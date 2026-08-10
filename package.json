@@ -1,0 +1,12 @@
+{
+  "name": "ai-music-video-os",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first AI instrumental music video production OS",
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "dev": "pnpm --filter @amv/web dev",
+    "build": "pnpm --filter @amv/web build",
+    "start": "pnpm --filter @amv/web start"
+  }
+}
