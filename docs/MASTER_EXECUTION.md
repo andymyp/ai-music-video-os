@@ -1902,7 +1902,7 @@ Maintain the following table in the project:
 | ----- | ----------------------- | ----------- |
 | 00    | Project Foundation      | COMPLETED   |
 | 01    | Domain Model            | COMPLETED   |
-| 02    | Database                | NOT_STARTED |
+| 02    | Database                | COMPLETED   |
 | 03    | Filesystem Storage      | NOT_STARTED |
 | 04    | Provider Contracts      | NOT_STARTED |
 | 05    | Mock Providers          | NOT_STARTED |

@@ -12,3 +12,10 @@ from datetime import datetime, timezone
 def utc_now() -> datetime:
     """Return the current UTC time as a timezone-aware ``datetime``."""
     return datetime.now(timezone.utc)
+
+
+def utc_naive(value: datetime) -> datetime:
+    """Return *value* as a naive UTC datetime (SQLite loses tzinfo)."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)

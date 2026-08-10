@@ -51,6 +51,10 @@ class Metadata(BaseModel):
             raise ValueError("at least one hashtag is required")
         return cleaned
 
+    def to_row_values(self) -> dict[str, object]:
+        """Flat values for DB row mapping."""
+        return {"title": self.title, "description": self.description, "hashtags": self.hashtags}
+
 
 class MetadataPackage(BaseModel):
     """Metadata for the master and each short (MAD-001 §82, PRD-001 §52)."""
@@ -77,6 +81,15 @@ class QualityDecision(BaseModel):
         if self.passed and self.issues:
             raise ValueError("passed must be False when issues exist")
         return self
+
+    def to_row_values(self) -> dict[str, object]:
+        """Flat values for DB row mapping."""
+        return {
+            "passed": self.passed,
+            "issues": self.issues,
+            "warnings": self.warnings,
+            "score": self.score,
+        }
 
 
 class ShortSegment(BaseModel):

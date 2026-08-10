@@ -9,8 +9,39 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from api.config.settings import AppSettings
+from api.database.base import Base
+
+
+@pytest.fixture
+def db_engine():
+    """An isolated in-memory SQLite engine with all tables created."""
+    engine = create_engine(
+        "sqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def session_factory(db_engine) -> sessionmaker:
+    """A session factory bound to the isolated in-memory engine."""
+    return sessionmaker(bind=db_engine)
+
+
+@pytest.fixture
+def db_session(session_factory):
+    """A bare session for direct ORM assertions (caller controls the transaction)."""
+    session = session_factory()
+    yield session
+    session.close()
 
 
 @pytest.fixture

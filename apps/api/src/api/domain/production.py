@@ -235,3 +235,23 @@ class ProductionConfig(BaseModel):
         if self.mode is ProductionMode.GENRE and not self.genre:
             raise ValueError("genre is required when mode is 'genre'")
         return self
+
+    def to_row_values(self) -> dict[str, object]:
+        """Flat values for DB row mapping (nested branding flattened)."""
+        return {
+            "mode": self.mode.value,
+            "genre": self.genre,
+            "branding_text": self.branding.text,
+            "branding_position": self.branding.position,
+            "branding_opacity": self.branding.opacity,
+            "branding_font_size": self.branding.font_size,
+            "long_form_duration_minutes": self.long_form_duration_minutes,
+            "short_form_duration_seconds": self.short_form_duration_seconds,
+            "master_width": self.master_width,
+            "master_height": self.master_height,
+            "fps": self.fps,
+            "short_width": self.short_width,
+            "short_height": self.short_height,
+            "visualizer_style": self.visualizer_style,
+            "provider_profile": self.provider_profile,
+        }

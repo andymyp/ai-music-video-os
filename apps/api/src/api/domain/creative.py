@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from api.core.clock import utc_now
+from api.core.clock import utc_naive, utc_now
 
 
 def _require_text(value: str, field: str) -> str:
@@ -43,6 +43,17 @@ class CreativeConcept(BaseModel):
         if value is None:
             return None
         return _require_text(value, "text")
+
+    def to_row_values(self) -> dict[str, object]:
+        """Flat values for DB row mapping."""
+        return {
+            "genre": self.genre,
+            "mood": self.mood,
+            "theme": self.theme,
+            "audience": self.audience,
+            "music_direction": self.music_direction,
+            "visual_direction": self.visual_direction,
+        }
 
 
 class MusicStrategy(BaseModel):
@@ -82,6 +93,20 @@ class MusicStrategy(BaseModel):
             raise ValueError(f"invalid bpm_range {value!r}; need 0 < low <= high")
         return value
 
+    def to_row_values(self) -> dict[str, object]:
+        """Flat values for DB row mapping (bpm range split into min/max)."""
+        return {
+            "genre": self.genre,
+            "mood": self.mood,
+            "bpm_min": self.bpm_range[0],
+            "bpm_max": self.bpm_range[1],
+            "key": self.key,
+            "structure": self.structure,
+            "instruments": self.instruments,
+            "duration_target_minutes": self.duration_target_minutes,
+            "vocal_policy": self.vocal_policy,
+        }
+
 
 class VisualStrategy(BaseModel):
     """Visual-direction blueprint (MAD-001 §20, TDD-001 §14)."""
@@ -113,6 +138,21 @@ class VisualStrategy(BaseModel):
                 continue
             cleaned.append(colour)
         return cleaned
+
+    def to_row_values(self) -> dict[str, object]:
+        """Flat values for DB row mapping."""
+        return {
+            "theme": self.theme,
+            "environment": self.environment,
+            "lighting": self.lighting,
+            "style": self.style,
+            "color_direction": self.color_direction,
+            "radio_style": self.radio_style,
+            "composition": self.composition,
+            "visualizer_style": self.visualizer_style,
+            "era": self.era,
+            "palette": self.palette,
+        }
 
 
 class TrendResult(BaseModel):
@@ -147,3 +187,20 @@ class TrendResult(BaseModel):
         if value is None:
             return None
         return _require_text(value, "genre").lower()
+
+    def to_row_values(self) -> dict[str, object]:
+        """Flat values for DB row mapping (recency stored as naive UTC)."""
+        return {
+            "source": self.source,
+            "topic": self.topic,
+            "genre": self.genre,
+            "score": self.score,
+            "confidence": self.confidence,
+            "recency": utc_naive(self.recency),
+            "evidence": self.evidence,
+            "growth": self.growth,
+            "volume": self.volume,
+            "cross_platform": self.cross_platform,
+            "content_fit": self.content_fit,
+            "reasoning": self.reasoning,
+        }
