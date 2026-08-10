@@ -6,6 +6,7 @@ structured, shell-free argument arrays (TDD-001 §92).
 """
 from __future__ import annotations
 
+from api.media.audio import AudioAnalysisEngine
 from api.media.base import MediaEngine
 from api.media.ffmpeg import (
     FFmpegMediaEngine,
@@ -29,6 +30,7 @@ from api.media.models import (
 __all__ = [
     "MediaEngine",
     "FFmpegMediaEngine",
+    "AudioAnalysisEngine",
     "build_render_args",
     "probe_to_model",
     "run_validation_checks",
