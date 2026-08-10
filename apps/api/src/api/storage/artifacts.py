@@ -46,6 +46,7 @@ class ArtifactKind(str, Enum):
     CREATIVE_CONCEPT = ("planning", "concept.json")
     MUSIC_STRATEGY = ("planning", "music-strategy.json")
     VISUAL_STRATEGY = ("planning", "visual-strategy.json")
+    SHORT_SEGMENT = ("planning", "short-segment.json")
     AUDIO_SOURCE = ("audio", "source.wav")
     AUDIO_MASTER = ("audio", "audio-master.wav")
     AUDIO_ANALYSIS = ("audio", "audio-analysis.json")

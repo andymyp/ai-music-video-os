@@ -50,3 +50,17 @@ class WorkflowRunRecord(BaseModel):
     attempt: int = 1
     error: str | None = None
     completed_status: ProductionStatus | None = None
+
+
+class PipelineStageResult(BaseModel):
+    """Result of one production-pipeline stage activity (MASTER §20).
+
+    Stage activities only need to report success, a short human-readable
+    summary and an optional error to the workflow; heavy artifacts are written
+    to the production's artifact directory and referenced by id.
+    """
+
+    stage: str
+    ok: bool = True
+    summary: str = ""
+    error: str = ""

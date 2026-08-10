@@ -84,7 +84,9 @@ class WorkflowConfig:
     task_timeout: timedelta = timedelta(seconds=10)
     validation_timeout: timedelta = timedelta(seconds=30)
     step_timeout: timedelta = timedelta(minutes=15)
-    max_steps_per_run: int = 20
+    #: Enough headroom for the full Phase 10 pipeline (18 stages + advances +
+    #: bookkeeping) so a normal run never hits ``continue_as_new``.
+    max_steps_per_run: int = 50
     max_attempts: int = _MAX_ATTEMPTS
     non_retryable_error_types: tuple[str, ...] = field(
         default_factory=lambda: tuple(sorted(NON_RETRYABLE_TYPES))

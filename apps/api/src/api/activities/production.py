@@ -18,8 +18,10 @@ from api.activities.services import MIN_DISK_FREE_BYTES, WorkflowServices
 from api.domain.agents import OrchestratorDecision, OrchestratorRequest
 from api.domain.enums import ProductionMode, ProductionStatus
 
-#: All activities a Temporal worker must register for the production workflow.
-ALL_ACTIVITIES = [
+#: Core activities a Temporal worker must register (Phase 09). The Phase 10
+#: pipeline activities are declared in ``api.activities.pipeline``; the package
+#: ``__init__`` combines them into ``ALL_ACTIVITIES`` for worker registration.
+CORE_ACTIVITIES = [
     "validate_production_input",
     "load_production_status",
     "plan_next_step",

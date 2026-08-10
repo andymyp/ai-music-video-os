@@ -35,9 +35,14 @@ from api.domain.agents import (
     TrendResearchRequest,
     VisualStrategyRequest,
 )
+from api.domain.creative import CreativeConcept, MusicStrategy, TrendResult, VisualStrategy
 from api.domain.enums import ProductionMode, ProductionStatus
 from api.domain.production import Production, ProductionConfig, next_status_in_flow
+from api.media.audio import AudioAnalysisEngine
+from api.media.ffmpeg import FFmpegMediaEngine
 from api.providers import register_mock_providers
+from api.storage.artifacts import ArtifactService
+from api.storage.storage import StorageService
 
 #: Minimum free disk space required before generation starts (TDD-001 §25).
 MIN_DISK_FREE_BYTES = 100 * 1024 * 1024  # 100 MiB
@@ -69,14 +74,28 @@ class WorkflowServices:
         session_factory: sessionmaker[Any] | None = None,
         provider_registry: ProviderRegistry | None = None,
         agent_runtime: AgentRuntime | None = None,
+        media_engine: FFmpegMediaEngine | None = None,
+        audio_engine: AudioAnalysisEngine | None = None,
+        artifact_service: ArtifactService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self._session_factory = session_factory or create_session_factory(self.settings)
         if provider_registry is None and agent_runtime is None:
             provider_registry = build_provider_registry(self.settings)
         self.provider_registry = provider_registry
+        self.media_engine = media_engine or FFmpegMediaEngine()
+        self.audio_engine = audio_engine or AudioAnalysisEngine()
+        if artifact_service is None:
+            productions_root = self.settings.app_data_dir / "productions"
+            artifact_service = ArtifactService(
+                StorageService(self.settings.app_data_dir),
+                productions_root,
+            )
+        self.artifact_service = artifact_service
         self.agent_runtime = agent_runtime or (
-            build_agent_runtime(provider_registry) if provider_registry is not None else None
+            build_agent_runtime(provider_registry, audio_engine=self.audio_engine)
+            if provider_registry is not None
+            else None
         )
 
     # --- database (each public method opens its own transactional scope) ----
@@ -119,6 +138,49 @@ class WorkflowServices:
     def save_trend_result(self, production_id: str, result) -> None:
         with session_scope(self._session_factory) as session:
             make_production_repository(session).save_trend_result(production_id, result)
+
+    # --- creative children (read by later pipeline stages, TDD-001 §12-15) ----
+
+    def save_concept(self, production_id: str, concept: CreativeConcept) -> None:
+        with session_scope(self._session_factory) as session:
+            make_production_repository(session).save_concept(production_id, concept)
+
+    def get_concept(self, production_id: str) -> CreativeConcept | None:
+        with session_scope(self._session_factory) as session:
+            return make_production_repository(session).get_concept(production_id)
+
+    def get_music_strategy(self, production_id: str) -> MusicStrategy | None:
+        with session_scope(self._session_factory) as session:
+            return make_production_repository(session).get_music_strategy(production_id)
+
+    def get_visual_strategy(self, production_id: str) -> VisualStrategy | None:
+        with session_scope(self._session_factory) as session:
+            return make_production_repository(session).get_visual_strategy(production_id)
+
+    def get_trend_result(self, production_id: str) -> TrendResult | None:
+        with session_scope(self._session_factory) as session:
+            return make_production_repository(session).get_trend_result(production_id)
+
+    # --- terminal transition (Phase 10) --------------------------------------
+
+    def complete_production(self, production_id: str) -> ProductionStatus:
+        """Drive the production through the final two states to COMPLETED.
+
+        ``generate_manifest`` leaves the production at GENERATING_METADATA, so
+        completing a run must advance QUALITY_CHECK and then COMPLETED. The
+        method is idempotent: a resumed run already at QUALITY_CHECK only steps
+        to COMPLETED.
+        """
+        with session_scope(self._session_factory) as session:
+            repo = make_production_repository(session)
+            production = repo.get(production_id)
+            if production is None:
+                raise WorkflowError(f"production {production_id!r} not found")
+            for target in (ProductionStatus.QUALITY_CHECK, ProductionStatus.COMPLETED):
+                if production.status is not target:
+                    production.transition_to(target)
+            repo.update(production)
+        return production.status
 
     def get_workflow_run(self, workflow_id: str):
         with session_scope(self._session_factory) as session:

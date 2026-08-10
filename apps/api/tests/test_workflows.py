@@ -152,7 +152,7 @@ def test_workflow_config_defaults_and_workflow_id():
     assert isinstance(config, WorkflowConfig)
     assert config.task_queue == "production"
     assert config.run_timeout == timedelta(hours=24)
-    assert config.max_steps_per_run == 20
+    assert config.max_steps_per_run == 50
     assert config.workflow_id("prod_x") == "production-prod_x-a1"
     assert config.workflow_id("prod_x", 3) == "production-prod_x-a3"
 
@@ -397,10 +397,13 @@ def test_production_workflow_is_async_and_models_validate():
 
 
 def test_all_activities_resolve_for_worker_registration():
+    """Every registered activity must resolve to a callable the worker can wire."""
+    from api.activities import pipeline as pipeline_module
     from api.activities import production as production_module
 
     for name in ALL_ACTIVITIES:
-        assert callable(getattr(production_module, name)), name
+        resolved = getattr(production_module, name, None) or getattr(pipeline_module, name, None)
+        assert callable(resolved), name
 
 
 def test_workflow_modules_never_import_side_effect_layers_at_top_level():
