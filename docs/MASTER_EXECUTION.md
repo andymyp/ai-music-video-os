@@ -1901,7 +1901,7 @@ Maintain the following table in the project:
 | Phase | Name                    | Status      |
 | ----- | ----------------------- | ----------- |
 | 00    | Project Foundation      | COMPLETED   |
-| 01    | Domain Model            | NOT_STARTED |
+| 01    | Domain Model            | COMPLETED   |
 | 02    | Database                | NOT_STARTED |
 | 03    | Filesystem Storage      | NOT_STARTED |
 | 04    | Provider Contracts      | NOT_STARTED |
