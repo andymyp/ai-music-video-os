@@ -69,12 +69,20 @@ class MusicStrategyRequest(BaseModel):
 # --- Visual strategy ----------------------------------------------------------
 
 class VisualStrategyRequest(BaseModel):
-    """Input for the Visual Strategy Agent (PRD-001 §65)."""
+    """Input for the Visual Strategy Agent (PRD-001 §65).
+
+    ``theme`` / ``music_direction`` come from the resolved CreativeConcept and
+    ``branding`` from the production, so the strategy reflects the full creative
+    direction (PRD-001 FR-015: genre, mood, theme, music direction, branding).
+    """
 
     genre: str
     mood: str
     music_strategy: MusicStrategy | None = None
     trend: TrendResearchResult | None = None
+    theme: str | None = Field(default=None, max_length=120)
+    music_direction: str | None = Field(default=None, max_length=200)
+    branding: str | None = Field(default=None, max_length=80)
 
     @field_validator("genre", "mood")
     @classmethod
@@ -83,6 +91,14 @@ class VisualStrategyRequest(BaseModel):
         if not value:
             raise ValueError("genre/mood must not be empty")
         return value
+
+    @field_validator("theme", "music_direction", "branding")
+    @classmethod
+    def _optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
 
 # --- Short selection ----------------------------------------------------------

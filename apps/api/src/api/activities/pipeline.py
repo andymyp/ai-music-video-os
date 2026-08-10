@@ -25,7 +25,7 @@ from api.activities.models import PipelineStageResult
 from api.activities.production import get_activity_services
 from api.capabilities import ImageGenerationRequest, MusicGenerationRequest
 from api.core.clock import utc_now
-from api.core.errors import QualityCheckError, WorkflowError
+from api.core.errors import ConfigurationError, QualityCheckError, WorkflowError
 from api.domain.agents import (
     MetadataRequest,
     MusicStrategyRequest,
@@ -244,12 +244,26 @@ async def master_audio(production_id: str) -> PipelineStageResult:
 
 @activity.defn
 async def generate_visual_strategy(production_id: str) -> PipelineStageResult:
-    """Run the Visual Strategy Agent and persist the visual blueprint."""
+    """Run the Visual Strategy Agent and persist the visual blueprint.
+
+    The request is derived from the creative concept (genre, mood, theme, music
+    direction, branding) per PRD-001 FR-015, so the strategy reflects the full
+    creative direction rather than just the genre.
+    """
     services = get_activity_services()
-    genre, mood = await _genre_mood(services, production_id)
+    production = await asyncio.to_thread(services.get_production, production_id)
+    concept = await asyncio.to_thread(services.get_concept, production_id)
+    genre = (concept.genre if concept else None) or (production.genre or "instrumental")
+    mood = (concept.mood if concept else None) or f"{genre} atmosphere"
     strategy = await services.agent_runtime.run(
         "visual_strategy",
-        VisualStrategyRequest(genre=genre, mood=mood),
+        VisualStrategyRequest(
+            genre=genre,
+            mood=mood,
+            theme=concept.theme if concept else None,
+            music_direction=concept.music_direction if concept else None,
+            branding=production.branding_text,
+        ),
     )
     await asyncio.to_thread(services.save_visual_strategy, production_id, strategy)
     await asyncio.to_thread(
@@ -263,44 +277,108 @@ async def generate_visual_strategy(production_id: str) -> PipelineStageResult:
 
 @activity.defn
 async def generate_background(production_id: str) -> PipelineStageResult:
-    """Generate the 16:9 background image and persist it as an artifact."""
+    """Generate the 16:9 background image, validate it, and persist it.
+
+    The prompt is derived from the persisted visual strategy (theme,
+    environment, lighting, style, palette) so the background matches the
+    creative direction (MASTER §23; PRD-001 FR-016). The generated PNG is
+    validated structurally (aspect ratio, minimum resolution) *before* it is
+    committed as the background asset (TDD-001 §47). Generation is idempotent
+    (MAD-001 §3.5): a valid background produced by the same strategy prompt is
+    reused instead of regenerated.
+    """
     services = get_activity_services()
     genre, mood = await _genre_mood(services, production_id)
+    strategy = await asyncio.to_thread(services.get_visual_strategy, production_id)
+
+    if strategy is not None:
+        prompt = services.visual_prompt_builder.background_prompt(strategy, genre, mood)
+        prompt_hash = services.visual_prompt_builder.prompt_hash(strategy)
+    else:
+        prompt = services.visual_prompt_builder.generic_background_prompt(genre, mood)
+        prompt_hash = services.visual_prompt_builder.hash_text(prompt)
+
+    # Idempotency: reuse a background already produced by this strategy.
+    if (
+        services.artifact_service.exists(production_id, ArtifactKind.BACKGROUND)
+        and services.artifact_service.exists(production_id, ArtifactKind.BACKGROUND_PROMPT)
+    ):
+        try:
+            sidecar = json.loads(
+                await asyncio.to_thread(
+                    services.artifact_service.read_text, production_id, ArtifactKind.BACKGROUND_PROMPT
+                )
+            )
+        except ValueError:
+            sidecar = {}
+        if sidecar.get("prompt_hash") == prompt_hash:
+            data = await asyncio.to_thread(
+                services.artifact_service.read, production_id, ArtifactKind.BACKGROUND
+            )
+            return _result(
+                "generate_background",
+                f"reused background png {len(data)} bytes (hash {prompt_hash[:8]})",
+            )
+
     image = await services.agent_runtime.run(
         "visual_generation",
         ImageGenerationRequest(
-            prompt=f"{genre} ambient background for a music video",
+            prompt=prompt,
             aspect_ratio="16:9",
-            style_hints=["ambient", genre],
+            style_hints=["ambient", genre, strategy.style] if strategy else ["ambient", genre],
         ),
     )
     data = image.image_bytes
     if not data:
         raise WorkflowError(f"image provider returned no background for production {production_id!r}")
+
+    # Structural validation before committing the asset (TDD-001 §47).
+    validation = services.image_validator.validate(
+        data, expected_aspect="16:9", min_width=1280, min_height=720
+    )
+    if not validation.valid:
+        failures = "; ".join(
+            f"{check.name}:{check.actual}" for check in validation.failures
+        )
+        raise QualityCheckError(
+            f"background failed validation for production {production_id!r}: {failures}"
+        )
+
     await asyncio.to_thread(services.artifact_service.write, production_id, ArtifactKind.BACKGROUND, data)
-    return _result("generate_background", f"png {len(data)} bytes")
+    sidecar = {
+        "prompt": prompt,
+        "prompt_hash": prompt_hash,
+        "theme": strategy.theme if strategy else None,
+        "style": strategy.style if strategy else None,
+    }
+    await asyncio.to_thread(
+        services.artifact_service.write_text,
+        production_id,
+        ArtifactKind.BACKGROUND_PROMPT,
+        json.dumps(sidecar, indent=2),
+    )
+    return _result(
+        "generate_background",
+        f"png {len(data)} bytes hash {prompt_hash[:8]} ({validation.width}x{validation.height})",
+    )
 
 
 @activity.defn
 async def resolve_radio(production_id: str) -> PipelineStageResult:
-    """Resolve the radio/visualizer focal image (mock: generated 1:1 PNG)."""
+    """Resolve the radio/visualizer focal image from the shared asset registry.
+
+    The strategy's radio_style selects a reusable asset; existing assets are
+    reused and only new styles trigger generation (MAD-001 §22, TDD-001 §48).
+    """
     services = get_activity_services()
-    genre, mood = await _genre_mood(services, production_id)
+    if services.radio_registry is None:
+        raise ConfigurationError("radio asset registry is not configured")
     strategy = await asyncio.to_thread(services.get_visual_strategy, production_id)
-    radio_style = (strategy.radio_style if strategy else None) or "glow"
-    image = await services.agent_runtime.run(
-        "visual_generation",
-        ImageGenerationRequest(
-            prompt=f"{radio_style} radio visualizer orb, {genre} {mood}",
-            aspect_ratio="1:1",
-            style_hints=["radio", "neon", radio_style],
-        ),
-    )
-    data = image.image_bytes
-    if not data:
-        raise WorkflowError(f"image provider returned no radio for production {production_id!r}")
-    await asyncio.to_thread(services.artifact_service.write, production_id, ArtifactKind.RADIO, data)
-    return _result("resolve_radio", "radio png")
+    radio_style = (strategy.radio_style if strategy else None) or "vintage"
+    asset = await services.radio_registry.resolve(radio_style)
+    await asyncio.to_thread(services.artifact_service.write, production_id, ArtifactKind.RADIO, asset.data)
+    verb = "reused" if asset.reused else "generated"
+    return _result("resolve_radio", f"{verb} {radio_style} radio")
 
 
 # --- Audio analysis / visualizer ---------------------------------------------

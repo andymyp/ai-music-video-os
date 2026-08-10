@@ -46,6 +46,7 @@ from api.domain.enums import ProductionMode, ProductionStatus
 from api.domain.outputs import MetadataPackage, QualityDecision, ShortSegment
 from api.domain.production import Production, _PRODUCTION_FLOW, next_status_in_flow
 from api.media.models import MediaValidationResult, ValidationCheck
+from api.visual import png_dimensions
 from api.providers import register_mock_providers
 from api.storage.artifacts import ArtifactKind
 from api.workflows.production import PIPELINE_STAGES, PIPELINE_STAGE_NAMES
@@ -298,17 +299,49 @@ async def test_master_audio_consumed_by_analysis(services, session_factory):
     assert analysis.duration_seconds == 2.0
 
 
-async def test_generate_background_writes_real_png(services, session_factory):
+async def test_generate_background_writes_validated_png(services, session_factory):
     prod = _make_production(session_factory)
     await run_pipeline(prod.id, stop_after="generate_background")
     data = services.artifact_service.read(prod.id, ArtifactKind.BACKGROUND)
     assert data[:8] == b"\x89PNG\r\n\x1a\n", "mock image provider must emit a PNG"
+    # The stage validates the image structurally before committing it (TDD-001 §47).
+    assert png_dimensions(data) == (1280, 720)
+    sidecar = json.loads(
+        services.artifact_service.read_text(prod.id, ArtifactKind.BACKGROUND_PROMPT)
+    )
+    assert sidecar["prompt_hash"], "idempotency hash must be recorded"
+    assert sidecar["theme"], "background prompt must reflect the visual strategy"
+
+
+async def test_generate_background_is_idempotent(services, session_factory):
+    """A background produced by the same strategy is reused, not regenerated
+    (MAD-001 §3.5 GenerateBackground idempotency)."""
+    prod = _make_production(session_factory)
+    await run_pipeline(prod.id, stop_after="generate_background")
+    first = services.artifact_service.read(prod.id, ArtifactKind.BACKGROUND)
+    result = await ActivityEnvironment().run(generate_background, prod.id)
+    assert result.ok
+    assert "reused" in result.summary
+    assert services.artifact_service.read(prod.id, ArtifactKind.BACKGROUND) == first
 
 
 async def test_resolve_radio(services, session_factory):
     prod = _make_production(session_factory)
     await run_pipeline(prod.id, stop_after="resolve_radio")
     assert services.artifact_service.exists(prod.id, ArtifactKind.RADIO)
+
+
+async def test_resolve_radio_reuses_asset_across_productions(services, session_factory):
+    """Same radio style resolves to the same bytes across productions
+    (MAD-001 §22 asset registry reuse, TDD-001 §48)."""
+    prod_a = _make_production(session_factory)
+    prod_b = _make_production(session_factory)
+    await run_pipeline(prod_a.id, stop_after="resolve_radio")
+    await run_pipeline(prod_b.id, stop_after="resolve_radio")
+    radio_a = services.artifact_service.read(prod_a.id, ArtifactKind.RADIO)
+    radio_b = services.artifact_service.read(prod_b.id, ArtifactKind.RADIO)
+    assert radio_a[:8] == b"\x89PNG\r\n\x1a\n"
+    assert radio_a == radio_b
 
 
 # --- Audio analysis / visualizer ----------------------------------------------
@@ -427,6 +460,7 @@ async def test_full_pipeline_reaches_completed_with_deliverables(services, sessi
         ArtifactKind.AUDIO_MASTER_REPORT,
         ArtifactKind.AUDIO_ANALYSIS,
         ArtifactKind.BACKGROUND,
+        ArtifactKind.BACKGROUND_PROMPT,
         ArtifactKind.RADIO,
         ArtifactKind.VISUALIZER_DATA,
         ArtifactKind.MASTER_VIDEO,

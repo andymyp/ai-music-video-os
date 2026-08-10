@@ -28,11 +28,21 @@ class VisualStrategyAgent:
 
     async def execute(self, request: VisualStrategyRequest) -> VisualStrategy:
         llm = self._tools.get("llm_generate")
-        prompt = (
+        parts = [
             f"Design the visual direction for an instrumental music video in {request.genre!r} "
-            f"with a {request.mood!r} mood. Include a central radio that can host a beat-reactive "
-            f"visualizer."
+            f"with a {request.mood!r} mood."
+        ]
+        if request.theme:
+            parts.append(f"The creative theme is {request.theme!r}.")
+        if request.music_direction:
+            parts.append(f"The music direction is {request.music_direction!r}.")
+        if request.branding:
+            parts.append(f"Branding context: {request.branding!r}.")
+        parts.append(
+            "Include a central radio that can host a beat-reactive visualizer and reserve "
+            "a suitable central area for it (MAD-001 §20)."
         )
+        prompt = " ".join(parts)
         result = await llm.run(
             StructuredGenerationRequest(
                 task="visual_strategy",

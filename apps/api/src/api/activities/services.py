@@ -46,6 +46,7 @@ from api.storage.artifacts import ArtifactService
 from api.storage.storage import StorageService
 from api.trend.cache import TrendCache
 from api.trend.engine import TrendEngine
+from api.visual import ImageValidator, RadioAssetRegistry, VisualPromptBuilder
 
 #: Minimum free disk space required before generation starts (TDD-001 §25).
 MIN_DISK_FREE_BYTES = 100 * 1024 * 1024  # 100 MiB
@@ -81,6 +82,9 @@ class WorkflowServices:
         audio_engine: AudioAnalysisEngine | None = None,
         audio_mastering_engine: AudioMasteringEngine | None = None,
         artifact_service: ArtifactService | None = None,
+        visual_prompt_builder: VisualPromptBuilder | None = None,
+        image_validator: ImageValidator | None = None,
+        radio_registry: RadioAssetRegistry | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self._session_factory = session_factory or create_session_factory(self.settings)
@@ -90,6 +94,21 @@ class WorkflowServices:
         self.media_engine = media_engine or FFmpegMediaEngine()
         self.audio_engine = audio_engine or AudioAnalysisEngine()
         self.audio_mastering_engine = audio_mastering_engine or AudioMasteringEngine()
+        # Phase 13 visual support: strategy-driven prompts, structural image
+        # validation and the shared radio asset registry (MAD-001 §22).
+        self.visual_prompt_builder = visual_prompt_builder or VisualPromptBuilder()
+        self.image_validator = image_validator or ImageValidator()
+        if radio_registry is None and provider_registry is not None:
+            try:
+                image_provider = provider_registry.resolve(Capability.IMAGE)
+            except ConfigurationError:
+                image_provider = None  # no image provider configured -> no registry
+            if image_provider is not None:
+                radio_registry = RadioAssetRegistry(
+                    StorageService(self.settings.app_data_dir / "assets"),
+                    image_provider,
+                )
+        self.radio_registry = radio_registry
         if artifact_service is None:
             productions_root = self.settings.app_data_dir / "productions"
             artifact_service = ArtifactService(
@@ -258,7 +277,8 @@ class WorkflowServices:
             raise WorkflowError(f"unknown agent {step.agent!r}")
         production = await asyncio.to_thread(self.get_production, step.production_id)
         config = await asyncio.to_thread(self.get_production_config, step.production_id)
-        request = build_agent_request(step.agent, production, config)
+        concept = await asyncio.to_thread(self.get_concept, step.production_id)
+        request = build_agent_request(step.agent, production, config, concept=concept)
         result = await self.agent_runtime.run(step.agent, request)
 
         # Persist strategy/trend outputs that later stages consume; media asset
@@ -290,11 +310,18 @@ def _mood(production: Production) -> str:
     return f"{production.genre or 'instrumental'} atmosphere"
 
 
-def build_agent_request(agent: str, production: Production, config: ProductionConfig | None):
+def build_agent_request(
+    agent: str,
+    production: Production,
+    config: ProductionConfig | None,
+    *,
+    concept: CreativeConcept | None = None,
+):
     """Build the typed agent input for *agent* from persisted production state.
 
     Deterministic: identical production state yields identical requests, which
-    keeps workflow replay stable (TDD-001 §23).
+    keeps workflow replay stable (TDD-001 §23). ``concept`` enriches the
+    creative stages (theme/music direction) when available.
     """
     genre = production.genre or "instrumental"
     mood = _mood(production)
@@ -311,7 +338,13 @@ def build_agent_request(agent: str, production: Production, config: ProductionCo
     if agent == "music_generation":
         return _music_generation_request(genre, mood, config)
     if agent == "visual_strategy":
-        return VisualStrategyRequest(genre=genre, mood=mood)
+        return VisualStrategyRequest(
+            genre=genre,
+            mood=mood,
+            theme=concept.theme if concept else None,
+            music_direction=concept.music_direction if concept else None,
+            branding=production.branding_text,
+        )
     if agent == "visual_generation":
         return _visual_generation_request(genre, config)
     if agent == "short_selection":

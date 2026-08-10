@@ -52,6 +52,7 @@ class ArtifactKind(str, Enum):
     AUDIO_MASTER_REPORT = ("audio", "audio-master-report.json")
     AUDIO_ANALYSIS = ("audio", "audio-analysis.json")
     BACKGROUND = ("visual", "background.png")
+    BACKGROUND_PROMPT = ("visual", "background-prompt.json")
     RADIO = ("visual", "radio.png")
     VISUALIZER_DATA = ("visual", "visualizer.json")
     MASTER_VIDEO = ("render", "master-16x9.mp4")
