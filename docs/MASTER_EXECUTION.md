@@ -1909,7 +1909,7 @@ Maintain the following table in the project:
 | 06    | Media Engine            | COMPLETED   |
 | 07    | Audio Analysis          | COMPLETED   |
 | 08    | Agent Runtime           | COMPLETED   |
-| 09    | Workflow Runtime        | NOT_STARTED |
+| 09    | Workflow Runtime        | COMPLETED   |
 | 10    | Production Workflow     | NOT_STARTED |
 | 11    | Trend Engine            | NOT_STARTED |
 | 12    | Music Pipeline          | NOT_STARTED |

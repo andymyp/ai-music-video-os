@@ -90,6 +90,29 @@ PRODUCTION_TRANSITIONS: dict[ProductionStatus, frozenset[ProductionStatus]] = (
 )
 
 
+def next_status_in_flow(status: ProductionStatus) -> ProductionStatus:
+    """Return the next forward status in the state machine (TDD-001 §10).
+
+    Filters the transition map for the single forward neighbor: the one target
+    that is not a dead end (FAILED/CANCELLED) and not the status itself (the
+    self-loop used for idempotent retries). Exactly one candidate remains, so
+    the result is deterministic regardless of set iteration order
+    (``ProductionStatus`` hashes as a ``str``, whose per-process seed is not
+    stable). The terminal COMPLETED is a valid forward move from QUALITY_CHECK
+    so a finished production reaches it; terminal and FAILED statuses have no
+    forward move and return themselves.
+    """
+    if status in TERMINAL_STATUSES or status is ProductionStatus.FAILED:
+        return status
+    candidates = [
+        target
+        for target in PRODUCTION_TRANSITIONS[status]
+        if target not in (ProductionStatus.FAILED, ProductionStatus.CANCELLED)
+        and target is not status
+    ]
+    return candidates[0] if candidates else status
+
+
 class BrandingConfig(BaseModel):
     """On-video branding overlay settings (MAD-001 §28)."""
 
