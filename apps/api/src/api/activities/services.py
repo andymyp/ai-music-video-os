@@ -40,6 +40,7 @@ from api.domain.enums import ProductionMode, ProductionStatus
 from api.domain.production import Production, ProductionConfig, next_status_in_flow
 from api.media.audio import AudioAnalysisEngine
 from api.media.ffmpeg import FFmpegMediaEngine
+from api.media.mastering import AudioMasteringEngine
 from api.providers import register_mock_providers
 from api.storage.artifacts import ArtifactService
 from api.storage.storage import StorageService
@@ -78,6 +79,7 @@ class WorkflowServices:
         agent_runtime: AgentRuntime | None = None,
         media_engine: FFmpegMediaEngine | None = None,
         audio_engine: AudioAnalysisEngine | None = None,
+        audio_mastering_engine: AudioMasteringEngine | None = None,
         artifact_service: ArtifactService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
@@ -87,6 +89,7 @@ class WorkflowServices:
         self.provider_registry = provider_registry
         self.media_engine = media_engine or FFmpegMediaEngine()
         self.audio_engine = audio_engine or AudioAnalysisEngine()
+        self.audio_mastering_engine = audio_mastering_engine or AudioMasteringEngine()
         if artifact_service is None:
             productions_root = self.settings.app_data_dir / "productions"
             artifact_service = ArtifactService(

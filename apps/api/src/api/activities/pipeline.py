@@ -48,6 +48,7 @@ PIPELINE_ACTIVITIES = [
     "generate_music_strategy",
     "generate_music",
     "validate_music",
+    "master_audio",
     "generate_visual_strategy",
     "generate_background",
     "resolve_radio",
@@ -154,40 +155,91 @@ async def generate_music_strategy(production_id: str) -> PipelineStageResult:
 
 @activity.defn
 async def generate_music(production_id: str) -> PipelineStageResult:
-    """Generate the instrumental source audio and persist it as artifacts."""
+    """Generate the instrumental source audio according to the music strategy.
+
+    Only the raw provider output is persisted (``AUDIO_SOURCE``); the master is
+    produced by the subsequent :func:`master_audio` normalization stage
+    (MASTER §22: Audio Asset → Music Validation → Master Audio). The strategy's
+    BPM range and instruments shape the request (PRD-001 FR-014).
+    """
     services = get_activity_services()
     config = await asyncio.to_thread(services.get_production_config, production_id)
     genre, mood = await _genre_mood(services, production_id)
+    strategy = await asyncio.to_thread(services.get_music_strategy, production_id)
+    prompt = f"instrumental {genre} track, {mood}"
+    style_hints = [mood]
+    if strategy is not None:
+        if strategy.bpm_range:
+            low, high = strategy.bpm_range
+            prompt += f", {low}-{high} bpm"
+        style_hints = [hint for hint in [mood, *strategy.instruments] if hint]
     audio = await services.agent_runtime.run(
         "music_generation",
         MusicGenerationRequest(
-            prompt=f"instrumental {genre} track, {mood}",
+            prompt=prompt,
             genre=genre,
             duration_seconds=max(config.short_form_duration_seconds if config else 45, 30),
-            style_hints=[mood],
+            style_hints=style_hints,
         ),
     )
     data = audio.audio_bytes
     if not data:
         raise WorkflowError(f"music provider returned no audio for production {production_id!r}")
     await asyncio.to_thread(services.artifact_service.write, production_id, ArtifactKind.AUDIO_SOURCE, data)
-    await asyncio.to_thread(services.artifact_service.write, production_id, ArtifactKind.AUDIO_MASTER, data)
-    return _result("generate_music", f"wav {len(data)} bytes")
+    return _result("generate_music", f"source wav {len(data)} bytes")
 
 
 @activity.defn
 async def validate_music(production_id: str) -> PipelineStageResult:
-    """Probe the master audio and reject a production whose audio is invalid."""
+    """Probe the generated audio and reject a production whose audio is invalid.
+
+    PRD-001 §18: existence, readability, duration, format, sample rate and
+    channel configuration are checked before the audio may proceed to mastering
+    or rendering.
+    """
     services = get_activity_services()
-    path = services.artifact_service.path_for(production_id, ArtifactKind.AUDIO_MASTER)
+    path = services.artifact_service.path_for(production_id, ArtifactKind.AUDIO_SOURCE)
     result = await services.media_engine.validate_media(
         path,
-        expectations=MediaExpectations(require_audio=True, min_duration=5.0),
+        expectations=MediaExpectations(
+            require_audio=True,
+            min_duration=5.0,
+            min_sample_rate=22050,
+            min_channels=1,
+            audio_codec="pcm_s16le",
+        ),
     )
     if not result.valid:
         failures = [check.name for check in result.failures]
         raise QualityCheckError(f"music validation failed: {failures}")
     return _result("validate_music", "audio validated")
+
+
+@activity.defn
+async def master_audio(production_id: str) -> PipelineStageResult:
+    """Normalize the source audio into the master (MAD-001 §19, PRD-001 §19).
+
+    Runs the Audio Mastering pipeline — sample rate, channel and loudness
+    normalization plus silence detection — writing ``AUDIO_MASTER`` and a
+    structural report artifact. The master is what rendering consumes.
+    """
+    services = get_activity_services()
+    source = services.artifact_service.path_for(production_id, ArtifactKind.AUDIO_SOURCE)
+    output = services.artifact_service.path_for(production_id, ArtifactKind.AUDIO_MASTER)
+    report = await services.audio_mastering_engine.master(source, output)
+    await asyncio.to_thread(
+        services.artifact_service.write_text,
+        production_id,
+        ArtifactKind.AUDIO_MASTER_REPORT,
+        report.model_dump_json(indent=2),
+    )
+    if not services.artifact_service.exists(production_id, ArtifactKind.AUDIO_MASTER):
+        raise QualityCheckError("audio mastering produced no master file")
+    return _result(
+        "master_audio",
+        f"{report.output_sample_rate} Hz / {report.output_channels}ch "
+        f"@ {report.loudness_db} dB",
+    )
 
 
 @activity.defn

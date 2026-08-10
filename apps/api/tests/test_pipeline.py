@@ -1,7 +1,7 @@
 """Phase 10: production pipeline (MASTER §20; TDD-001 §22-25; MAD-001 §9).
 
 Drives every pipeline stage over the offline ``ActivityEnvironment`` with mock
-providers and injectable (fake) media/audio engines, then runs the full 19-stage
+providers and injectable (fake) media/audio engines, then runs the full 20-stage
 sequence end to end and asserts the deliverables from MAD-001 §80-81 exist and
 the production reaches COMPLETED. No Temporal server is needed for the stage
 tests; a server-backed workflow run is gated behind the embedded test server.
@@ -26,6 +26,7 @@ from api.activities.pipeline import (
     generate_music_strategy,
     generate_visual_strategy,
     generate_visualizer,
+    master_audio,
     render_master,
     render_short,
     resolve_creative_direction,
@@ -49,13 +50,14 @@ from api.providers import register_mock_providers
 from api.storage.artifacts import ArtifactKind
 from api.workflows.production import PIPELINE_STAGES, PIPELINE_STAGE_NAMES
 
-#: The 18 stage activities in canonical order (MASTER §20; validate_input is
+#: The 19 stage activities in canonical order (MASTER §20/§22; validate_input is
 #: the workflow's first activity, exercised separately in test_workflows.py).
 PIPELINE_STAGE_FNS = (
     resolve_creative_direction,
     generate_music_strategy,
     generate_music,
     validate_music,
+    master_audio,
     generate_visual_strategy,
     generate_background,
     resolve_radio,
@@ -239,12 +241,14 @@ async def test_generate_visual_strategy(services, session_factory):
 
 # --- Music / visual assets ----------------------------------------------------
 
-async def test_generate_music_writes_real_wav(services, session_factory):
+async def test_generate_music_writes_real_source_wav(services, session_factory):
     prod = _make_production(session_factory)
     await run_pipeline(prod.id, stop_after="generate_music")
-    data = services.artifact_service.read(prod.id, ArtifactKind.AUDIO_MASTER)
+    data = services.artifact_service.read(prod.id, ArtifactKind.AUDIO_SOURCE)
     assert data[:4] == b"RIFF", "mock provider must emit a RIFF/WAVE container"
-    assert services.artifact_service.exists(prod.id, ArtifactKind.AUDIO_SOURCE)
+    # The master is produced by the separate mastering stage (Phase 12), not
+    # by generation.
+    assert not services.artifact_service.exists(prod.id, ArtifactKind.AUDIO_MASTER)
 
 
 async def test_validate_music_passes_when_audio_present(services, session_factory):
@@ -258,6 +262,40 @@ async def test_validate_music_fails_without_audio(services, session_factory):
     prod = _make_production(session_factory)
     with pytest.raises(QualityCheckError):
         await ActivityEnvironment().run(validate_music, prod.id)
+
+
+# --- Mastering (MASTER §22; MAD-001 §19, PRD-001 §19) ------------------------
+
+async def test_master_audio_produces_normalized_master_and_report(services, session_factory):
+    prod = _make_production(session_factory)
+    await run_pipeline(prod.id, stop_after="validate_music")
+    result = await ActivityEnvironment().run(master_audio, prod.id)
+    assert result.ok and result.stage == "master_audio"
+    assert services.artifact_service.exists(prod.id, ArtifactKind.AUDIO_MASTER)
+    master = services.artifact_service.read(prod.id, ArtifactKind.AUDIO_MASTER)
+    assert master[:4] == b"RIFF", "mastered audio must be a WAV"
+    assert len(master) > 0
+    report = json.loads(
+        services.artifact_service.read_text(prod.id, ArtifactKind.AUDIO_MASTER_REPORT)
+    )
+    assert report["output_sample_rate"] == 44100
+    assert report["output_channels"] == 2
+    assert report["duration_seconds"] > 0
+    assert -90.0 < report["loudness_db"] < 0.0
+    assert report["leading_silence_seconds"] >= 0
+    assert report["trailing_silence_seconds"] >= 0
+
+
+async def test_master_audio_consumed_by_analysis(services, session_factory):
+    """The audio analysis stage analyzes the master, not the raw source."""
+    prod = _make_production(session_factory)
+    await run_pipeline(prod.id, stop_after="analyze_audio")
+    # FakeAudioEngine returns its fixed analysis; what matters is that the
+    # pipeline reached analysis through the master artifact.
+    analysis = AudioAnalysis.model_validate_json(
+        services.artifact_service.read_text(prod.id, ArtifactKind.AUDIO_ANALYSIS)
+    )
+    assert analysis.duration_seconds == 2.0
 
 
 async def test_generate_background_writes_real_png(services, session_factory):
@@ -386,6 +424,7 @@ async def test_full_pipeline_reaches_completed_with_deliverables(services, sessi
     for kind in (
         ArtifactKind.AUDIO_SOURCE,
         ArtifactKind.AUDIO_MASTER,
+        ArtifactKind.AUDIO_MASTER_REPORT,
         ArtifactKind.AUDIO_ANALYSIS,
         ArtifactKind.BACKGROUND,
         ArtifactKind.RADIO,

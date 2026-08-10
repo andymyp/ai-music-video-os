@@ -49,6 +49,7 @@ class ArtifactKind(str, Enum):
     SHORT_SEGMENT = ("planning", "short-segment.json")
     AUDIO_SOURCE = ("audio", "source.wav")
     AUDIO_MASTER = ("audio", "audio-master.wav")
+    AUDIO_MASTER_REPORT = ("audio", "audio-master-report.json")
     AUDIO_ANALYSIS = ("audio", "audio-analysis.json")
     BACKGROUND = ("visual", "background.png")
     RADIO = ("visual", "radio.png")
