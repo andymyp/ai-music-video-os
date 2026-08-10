@@ -1,10 +1,10 @@
 """Trend Research Agent (MAD-001 §34; PRD-001 §62; TDD-001 §28-29).
 
-Receives available trend data through the registered ``trend_search`` tool,
-analyzes the signals and produces structured recommendations with a chosen
-genre, confidence and reasoning. Aggregation is deterministic (TDD-001 §29):
-signals are normalized into domain :class:`TrendResult` rows and ranked by
-score.
+Receives scored, ranked trend results through the registered ``trend_search``
+tool (which runs the Phase 11 Trend Engine), selects the strongest genre
+direction and produces structured recommendations. The weighted composite
+(MAD-001 §16) is computed inside the engine, so the agent interprets evidence
+rather than re-normalizing raw signals.
 """
 from __future__ import annotations
 
@@ -36,39 +36,23 @@ class TrendResearchAgent:
                 time_window_days=request.time_window_days,
             )
         )
-        signals = output.signals
-        if not signals:
-            raise AgentError("trend search returned no signals")
+        results = list(output.results)
+        if not results:
+            raise AgentError("trend search returned no fresh signals")
 
-        recommendations = [self._to_trend_result(signal, request.genre_hint) for signal in signals]
-        recommendations.sort(key=lambda r: r.score, reverse=True)
-        top = recommendations[0]
+        # The engine already ranks deterministically; re-sort defensively so the
+        # agent never depends on tool ordering (TDD-001 §29).
+        results.sort(key=lambda r: r.score, reverse=True)
+        top = results[0]
         selected_genre = request.genre_hint or top.genre or top.topic
-        confidence = round(float(sum(r.score for r in recommendations) / 100.0 / len(recommendations)), 3)
+        confidence = round(float(sum(r.score for r in results) / 100.0 / len(results)), 3)
 
         return TrendResearchResult(
-            recommendations=recommendations,
+            recommendations=results,
             selected_genre=selected_genre,
             confidence=confidence,
-            reasoning=f"top {len(recommendations)} signals ranked by score; leading: {top.topic}",
+            reasoning=(
+                f"top {len(results)} signals ranked by weighted trend score; "
+                f"leading: {top.topic} ({top.score:.1f}/100)"
+            ),
         )
-
-    @staticmethod
-    def _to_trend_result(signal, genre_hint: str | None) -> TrendResult:
-        volume = float(signal.volume or 0)
-        growth = float(signal.growth or 0.0)
-        fields: dict[str, object] = dict(
-            source=signal.platform or "unknown",
-            topic=signal.topic,
-            genre=genre_hint,
-            score=round(signal.score * 100.0, 1),
-            confidence=signal.score,
-            growth=round(min(max(growth, 0.0), 1.0), 3),
-            volume=round(min(volume / 10000.0, 1.0), 3),
-            reasoning=signal.summary or "",
-        )
-        # Propagate a provider-supplied recency so identical requests stay
-        # deterministic; otherwise the model's utc_now() default applies.
-        if signal.recency is not None:
-            fields["recency"] = signal.recency
-        return TrendResult(**fields)

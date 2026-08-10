@@ -25,11 +25,12 @@ from api.capabilities import (
     StructuredGenerationRequest,
     StructuredResult,
     TrendQuery,
-    TrendSignal,
 )
 from api.core.errors import AppError, ConfigurationError, ToolError
 from api.domain.audio import AudioAnalysis
+from api.domain.creative import TrendResult
 from api.media.audio import AudioAnalysisEngine
+from api.trend.engine import TrendEngine
 
 ToolInputT = TypeVar("ToolInputT", contravariant=True)
 ToolOutputT = TypeVar("ToolOutputT", covariant=True)
@@ -105,9 +106,14 @@ class _CapabilityTool(Tool[Any, Any]):
 # --- I/O schemas --------------------------------------------------------------
 
 class TrendSearchOutput(BaseModel):
-    """Strict output wrapper for trend discovery (list of signals)."""
+    """Strict output wrapper for trend discovery (scored, ranked results).
 
-    signals: list[TrendSignal]
+    Phase 11 replaced the raw signal list with the engine's scored/ranked
+    :class:`~api.domain.creative.TrendResult` rows so the agent consumes a
+    weighted composite (MAD-001 §16) instead of raw provider scores.
+    """
+
+    results: list[TrendResult]
 
 
 class AudioAnalysisRequest(BaseModel):
@@ -134,19 +140,26 @@ class CapabilityStatus(BaseModel):
 # --- Concrete tools -----------------------------------------------------------
 
 class TrendSearchTool(_CapabilityTool):
-    """Discover trend signals through the TREND capability."""
+    """Discover, score and rank trend signals via the trend engine.
+
+    The tool is the agent-facing boundary to the TREND capability (TDD-001 §93);
+    aggregation, weighted scoring, staleness filtering and caching (Phase 11)
+    happen inside the :class:`~api.trend.engine.TrendEngine`.
+    """
 
     name = "trend_search"
-    description = "Discover and rank trend signals via the trend capability."
+    description = "Discover, score and rank current trend signals."
     input_schema = TrendQuery
     output_schema = TrendSearchOutput
     capability = Capability.TREND
 
-    async def run(self, input: TrendQuery) -> TrendSearchOutput:
-        async def call(provider: Any) -> list[TrendSignal]:
-            return await provider.discover(input)
+    def __init__(self, registry: ProviderRegistry, *, engine: TrendEngine | None = None) -> None:
+        super().__init__(registry)
+        self._engine = engine or TrendEngine(registry)
 
-        return TrendSearchOutput(signals=await _call_with_failover(self._providers(), call))
+    async def run(self, input: TrendQuery) -> TrendSearchOutput:
+        results = await self._engine.search(input)
+        return TrendSearchOutput(results=results)
 
 
 class LLMGenerationTool(_CapabilityTool):

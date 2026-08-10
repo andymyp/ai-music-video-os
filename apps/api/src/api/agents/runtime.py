@@ -24,6 +24,7 @@ from api.agents.tools import (
 from api.capabilities import ProviderRegistry
 from api.core.errors import ConfigurationError
 from api.media.audio import AudioAnalysisEngine
+from api.trend.engine import TrendEngine
 from api.agents.orchestrator import OrchestratorAgent
 from api.agents.trend import TrendResearchAgent
 from api.agents.music_strategy import MusicStrategyAgent
@@ -84,11 +85,12 @@ def build_agent_runtime(
     provider_registry: ProviderRegistry,
     *,
     audio_engine: AudioAnalysisEngine | None = None,
+    trend_engine: TrendEngine | None = None,
 ) -> AgentRuntime:
     """Wire the standard tools + nine agents over *provider_registry*."""
     runtime = AgentRuntime()
 
-    runtime.register_tool(TrendSearchTool(provider_registry))
+    runtime.register_tool(TrendSearchTool(provider_registry, engine=trend_engine))
     runtime.register_tool(LLMGenerationTool(provider_registry))
     runtime.register_tool(MusicGenerationTool(provider_registry))
     runtime.register_tool(ImageGenerationTool(provider_registry))

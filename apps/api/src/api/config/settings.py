@@ -17,6 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from api.config.profiles import ENVIRONMENT_PROFILES, PROVIDER_MODES
 from api.core.paths import find_project_root
+from api.trend.weights import TrendWeights
 
 
 class AppSettings(BaseSettings):
@@ -50,6 +51,15 @@ class AppSettings(BaseSettings):
     # --- Resource limits (MAD-001 §43, §71) -----------------------------------
     max_concurrent_productions: int = 1
     max_render_workers: int = 1
+
+    # --- Trend engine (Phase 11; MAD-001 §16, TDD-001 §29, §108) --------------
+    trend_weight_growth: float = 0.30
+    trend_weight_volume: float = 0.25
+    trend_weight_cross_platform: float = 0.20
+    trend_weight_recency: float = 0.15
+    trend_weight_content_fit: float = 0.10
+    trend_cache_ttl_seconds: int = 300
+    trend_max_signal_age_days: int = 30
 
     # --- Rendering defaults (MAD-001 §94) -------------------------------------
     master_video_width: int = 1920
@@ -108,6 +118,18 @@ class AppSettings(BaseSettings):
             return self.database_url
         default_db = (self.app_data_dir / "database" / "app.db").as_posix()
         return f"sqlite:///{default_db}"
+
+    # --- Trend engine (MAD-001 §16) -------------------------------------------
+
+    def trend_weights(self) -> TrendWeights:
+        """Configurable weighted scoring model; validates sum-to-1.0."""
+        return TrendWeights(
+            growth=self.trend_weight_growth,
+            volume=self.trend_weight_volume,
+            cross_platform=self.trend_weight_cross_platform,
+            recency=self.trend_weight_recency,
+            content_fit=self.trend_weight_content_fit,
+        )
 
 
 @lru_cache

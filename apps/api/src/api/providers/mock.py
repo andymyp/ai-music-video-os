@@ -16,7 +16,10 @@ import json
 import math
 import struct
 import zlib
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
+
+from api.core.clock import utc_now
 
 from api.capabilities import (
     Capability,
@@ -310,32 +313,45 @@ class MockEmbeddingProvider(EmbeddingProvider):
 
 _PLATFORMS = ("tiktok", "youtube", "instagram", "spotify")
 
-_EPOCH = 1_700_000_000  # 2023-11-14 UTC anchor for deterministic mock recency
 
-
-def _trend_recency(seed: str):
-    """Deterministic UTC datetime derived from *seed* (stable across runs)."""
-    from datetime import datetime, timezone
-
-    offset = _crc(seed) % (365 * 24 * 3600)
-    return datetime.fromtimestamp(_EPOCH + offset, tz=timezone.utc)
+def _minute_now(clock: Callable[[], datetime]) -> datetime:
+    """UTC-aware *now* truncated to the minute (keeps mock output stable in-run)."""
+    now = clock()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    aware = now.astimezone(timezone.utc)
+    return aware.replace(second=0, microsecond=0)
 
 
 class MockTrendProvider(TrendProvider):
-    """Returns deterministic trend signals derived from the query anchor."""
+    """Returns deterministic, time-aware trend signals derived from the query.
 
-    def __init__(self, model: str = "mock-trend") -> None:
+    Recency is anchored to the current time (rounded to the minute) minus a
+    deterministic offset inside the query's time window, so signals are always
+    "fresh" for Phase 11's staleness rules while staying reproducible within a
+    run. An injectable ``clock`` pins the anchor in tests.
+    """
+
+    def __init__(
+        self,
+        model: str = "mock-trend",
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.model = model
+        self._clock = clock or utc_now
 
     async def discover(self, query: TrendQuery) -> list[TrendSignal]:
         anchor = query.keyword or query.genre or "music"
         platforms = query.platforms or list(_PLATFORMS)
+        now = _minute_now(self._clock)
+        window_seconds = max(query.time_window_days * 24 * 3600, 1)
         signals: list[TrendSignal] = []
         for i in range(query.limit):
             platform = platforms[i % len(platforms)]
             seed = _seed(anchor, platform, str(i))
             score = round(1.0 - (i / max(query.limit, 1)) * 0.9, 3)
-            recency = _trend_recency(f"{seed}:recency")
+            recency = now - timedelta(seconds=_crc(f"{seed}:recency") % window_seconds)
             signals.append(
                 TrendSignal(
                     topic=f"{anchor}-concept-{i + 1}",

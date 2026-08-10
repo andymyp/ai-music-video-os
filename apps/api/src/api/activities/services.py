@@ -43,6 +43,8 @@ from api.media.ffmpeg import FFmpegMediaEngine
 from api.providers import register_mock_providers
 from api.storage.artifacts import ArtifactService
 from api.storage.storage import StorageService
+from api.trend.cache import TrendCache
+from api.trend.engine import TrendEngine
 
 #: Minimum free disk space required before generation starts (TDD-001 §25).
 MIN_DISK_FREE_BYTES = 100 * 1024 * 1024  # 100 MiB
@@ -93,9 +95,24 @@ class WorkflowServices:
             )
         self.artifact_service = artifact_service
         self.agent_runtime = agent_runtime or (
-            build_agent_runtime(provider_registry, audio_engine=self.audio_engine)
+            build_agent_runtime(
+                provider_registry,
+                audio_engine=self.audio_engine,
+                trend_engine=self._build_trend_engine(provider_registry),
+            )
             if provider_registry is not None
             else None
+        )
+
+    def _build_trend_engine(self, provider_registry: ProviderRegistry) -> TrendEngine:
+        """Configure the Phase 11 trend engine from application settings."""
+        return TrendEngine(
+            provider_registry,
+            weights=self.settings.trend_weights(),
+            cache=TrendCache(
+                ttl_seconds=self.settings.trend_cache_ttl_seconds,
+            ),
+            max_signal_age_days=self.settings.trend_max_signal_age_days,
         )
 
     # --- database (each public method opens its own transactional scope) ----
