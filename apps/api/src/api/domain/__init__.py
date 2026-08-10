@@ -6,6 +6,18 @@ Public surface of the domain models so the rest of the backend imports from
 from __future__ import annotations
 
 from api.domain.assets import Asset
+from api.domain.agents import (
+    MetadataRequest,
+    MusicStrategyRequest,
+    OrchestratorDecision,
+    OrchestratorRequest,
+    QualityControlRequest,
+    ShortSelectionRequest,
+    TechnicalCheck,
+    TrendResearchRequest,
+    TrendResearchResult,
+    VisualStrategyRequest,
+)
 from api.domain.audio import AudioAnalysis, AudioSection, VisualizerData
 from api.domain.creative import CreativeConcept, MusicStrategy, TrendResult, VisualStrategy
 from api.domain.enums import (
@@ -50,4 +62,15 @@ __all__ = [
     "AudioAnalysis",
     "AudioSection",
     "VisualizerData",
+    # agents
+    "TrendResearchRequest",
+    "TrendResearchResult",
+    "MusicStrategyRequest",
+    "VisualStrategyRequest",
+    "ShortSelectionRequest",
+    "MetadataRequest",
+    "TechnicalCheck",
+    "QualityControlRequest",
+    "OrchestratorRequest",
+    "OrchestratorDecision",
 ]

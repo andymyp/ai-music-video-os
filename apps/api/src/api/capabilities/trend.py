@@ -8,6 +8,7 @@ possible (TDD-001 §29), so providers expose raw signals with a normalized
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -40,6 +41,7 @@ class TrendSignal(BaseModel):
     score: float = Field(ge=0, le=1)
     growth: float | None = None
     volume: int | None = Field(default=None, ge=0)
+    recency: datetime | None = Field(default=None)
     summary: str | None = None
 
     @field_validator("topic")

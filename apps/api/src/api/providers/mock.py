@@ -310,6 +310,16 @@ class MockEmbeddingProvider(EmbeddingProvider):
 
 _PLATFORMS = ("tiktok", "youtube", "instagram", "spotify")
 
+_EPOCH = 1_700_000_000  # 2023-11-14 UTC anchor for deterministic mock recency
+
+
+def _trend_recency(seed: str):
+    """Deterministic UTC datetime derived from *seed* (stable across runs)."""
+    from datetime import datetime, timezone
+
+    offset = _crc(seed) % (365 * 24 * 3600)
+    return datetime.fromtimestamp(_EPOCH + offset, tz=timezone.utc)
+
 
 class MockTrendProvider(TrendProvider):
     """Returns deterministic trend signals derived from the query anchor."""
@@ -325,6 +335,7 @@ class MockTrendProvider(TrendProvider):
             platform = platforms[i % len(platforms)]
             seed = _seed(anchor, platform, str(i))
             score = round(1.0 - (i / max(query.limit, 1)) * 0.9, 3)
+            recency = _trend_recency(f"{seed}:recency")
             signals.append(
                 TrendSignal(
                     topic=f"{anchor}-concept-{i + 1}",
@@ -332,6 +343,7 @@ class MockTrendProvider(TrendProvider):
                     score=score,
                     growth=round((_crc(f"{seed}:growth") % 200) / 100.0, 2),
                     volume=1000 + (_crc(f"{seed}:volume") % 9000),
+                    recency=recency,
                     summary=f"Mock trend #{i + 1} for {anchor!r} on {platform}",
                 )
             )

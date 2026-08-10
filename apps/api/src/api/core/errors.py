@@ -72,5 +72,13 @@ class WorkflowError(AppError):
     """Raised when a Temporal workflow/activity fails unexpectedly."""
 
 
+class AgentError(AppError):
+    """Raised when an agent fails (invalid AI output, missing tool, guardrail)."""
+
+
+class ToolError(AppError):
+    """Raised when a registered tool fails or is unavailable."""
+
+
 class QualityCheckError(AppError):
     """Raised when a production fails mandatory quality control."""
