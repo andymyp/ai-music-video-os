@@ -10,6 +10,7 @@ the media engine directly.
 """
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Generic, TypeVar
 
@@ -27,6 +28,7 @@ from api.capabilities import (
     TrendQuery,
 )
 from api.core.errors import AppError, ConfigurationError, ToolError
+from api.core.observability import OperationLogger
 from api.domain.audio import AudioAnalysis
 from api.domain.creative import TrendResult
 from api.media.audio import AudioAnalysisEngine
@@ -74,14 +76,38 @@ class ToolRegistry:
         return sorted(self._tools)
 
 
-async def _call_with_failover(providers: list[Any], call: Any) -> Any:
-    """Try each enabled provider best-first; first success wins (PRD §64.5)."""
+def _provider_label(provider: Any) -> tuple[str | None, str | None]:
+    """Best-effort (model, provider) attribution for a provider object."""
+    model = getattr(provider, "model", None) or getattr(provider, "provider_id", None)
+    provider_name = getattr(provider, "provider_id", None) or type(provider).__name__
+    return str(model) if model else None, str(provider_name)
+
+
+async def _call_with_failover(providers: list[Any], call: Any, *, capability: str | None = None) -> Any:
+    """Try each enabled provider best-first; first success wins (PRD §64.5).
+
+    Every attempt is timed and recorded as a ``provider.call`` metric with the
+    capability, provider model, status and latency (MAD-001 §50) so provider
+    reliability is observable from the aggregated summary.
+    """
     errors: list[str] = []
     for provider in providers:
+        model, provider_name = _provider_label(provider)
         try:
-            return await call(provider)
+            async with OperationLogger(
+                "provider.call",
+                component=capability,
+                event="provider.call",
+                provider=provider_name,
+                model=model,
+            ):
+                result = await call(provider)
         except AppError as exc:
+            # The OperationLogger's __aexit__ already recorded the failed attempt
+            # as an error metric; continue to the next provider for failover.
             errors.append(f"{type(exc).__name__}: {exc}")
+            continue
+        return result
     raise ToolError("all providers failed: " + ("; ".join(errors) or "no providers"))
 
 
@@ -175,7 +201,7 @@ class LLMGenerationTool(_CapabilityTool):
         async def call(provider: Any) -> StructuredResult:
             return await provider.generate_structured(input)
 
-        return await _call_with_failover(self._providers(), call)
+        return await _call_with_failover(self._providers(), call, capability=self.capability.value)
 
 
 class MusicGenerationTool(_CapabilityTool):
@@ -191,7 +217,7 @@ class MusicGenerationTool(_CapabilityTool):
         async def call(provider: Any) -> GeneratedAudio:
             return await provider.generate(input)
 
-        return await _call_with_failover(self._providers(), call)
+        return await _call_with_failover(self._providers(), call, capability=self.capability.value)
 
 
 class ImageGenerationTool(_CapabilityTool):
@@ -207,7 +233,7 @@ class ImageGenerationTool(_CapabilityTool):
         async def call(provider: Any) -> GeneratedImage:
             return await provider.generate(input)
 
-        return await _call_with_failover(self._providers(), call)
+        return await _call_with_failover(self._providers(), call, capability=self.capability.value)
 
 
 class CapabilityStatusTool(_CapabilityTool):

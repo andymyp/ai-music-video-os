@@ -17,6 +17,7 @@ from api.activities import WorkflowServices, set_activity_services
 from api.activities import ALL_ACTIVITIES as _ALL_ACTIVITY_NAMES
 from api.config.settings import AppSettings, get_settings
 from api.core.logging import configure_logging
+from api.core.observability import get_metrics, init_metrics
 from api.media.audio import AudioAnalysisEngine
 from api.media.ffmpeg import FFmpegMediaEngine
 from api.storage.artifacts import ArtifactService
@@ -28,6 +29,9 @@ from api.workflows.production import ProductionWorkflow
 async def run_worker(settings: AppSettings | None = None) -> None:
     settings = settings or get_settings()
     configure_logging(settings)
+    # Phase 22 observability: the SQLite metrics store backs provider/stage/
+    # workflow instrumentation for the life of the worker.
+    init_metrics(settings)
 
     # Build the services container (registers mock providers in dev/test).
     services = WorkflowServices(
@@ -38,6 +42,7 @@ async def run_worker(settings: AppSettings | None = None) -> None:
             StorageService(settings.app_data_dir),
             settings.app_data_dir / "productions",
         ),
+        metrics=get_metrics(),
     )
     set_activity_services(services)
 

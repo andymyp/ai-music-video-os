@@ -28,6 +28,7 @@ from api.activities.production import get_activity_services
 from api.capabilities import ImageGenerationRequest, MusicGenerationRequest
 from api.core.clock import utc_now
 from api.core.errors import ConfigurationError, QualityCheckError, WorkflowError
+from api.core.observability import instrument
 from api.domain.agents import (
     MetadataRequest,
     MusicStrategyRequest,
@@ -172,6 +173,7 @@ async def generate_music_strategy(production_id: str) -> PipelineStageResult:
 
 
 @activity.defn
+@instrument("pipeline", "generate_music")
 async def generate_music(production_id: str) -> PipelineStageResult:
     """Generate the instrumental source audio according to the music strategy.
 
@@ -403,6 +405,7 @@ async def resolve_radio(production_id: str) -> PipelineStageResult:
 
 
 @activity.defn
+@instrument("pipeline", "analyze_audio")
 async def analyze_audio(production_id: str) -> PipelineStageResult:
     """Analyze the master audio and persist the analysis document."""
     services = get_activity_services()
@@ -502,6 +505,7 @@ def _visualizer_frames_dir(services, production_id: str) -> Path:
 
 
 @activity.defn
+@instrument("pipeline", "render_master")
 async def render_master(production_id: str) -> PipelineStageResult:
     """Compose background + radio + visualizer + branding + audio (MAD-001 §24).
 
@@ -714,6 +718,7 @@ def _short_frames_dir(services, production_id: str) -> Path:
 
 
 @activity.defn
+@instrument("pipeline", "render_short")
 async def render_short(production_id: str) -> PipelineStageResult:
     """Trim the selected segment into the 9:16 short render (MAD-001 §25-27).
 
@@ -946,6 +951,7 @@ def _visual_concept_summary(concept, visual) -> str:
 
 
 @activity.defn
+@instrument("pipeline", "run_qc")
 async def run_qc(production_id: str) -> PipelineStageResult:
     """Run the Quality Control Agent over the produced artifacts (MAD-001 §33).
 
@@ -1047,6 +1053,7 @@ async def generate_manifest(production_id: str) -> PipelineStageResult:
 
 
 @activity.defn
+@instrument("pipeline", "complete_production")
 async def complete_production(production_id: str) -> PipelineStageResult:
     """Drive the production to COMPLETED (idempotent final transition)."""
     services = get_activity_services()

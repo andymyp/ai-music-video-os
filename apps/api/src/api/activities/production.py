@@ -135,5 +135,28 @@ async def advance_production(production_id: str) -> str:
 
 @activity.defn
 async def record_workflow_run(record: WorkflowRunRecord) -> None:
-    """Upsert the workflow run's lifecycle status (TDD-001 §18)."""
-    await asyncio.to_thread(get_activity_services().upsert_workflow_run, record)
+    """Upsert the workflow run's lifecycle status (TDD-001 §18).
+
+    Also feeds the Phase 22 observability aggregates: a run start opens the
+    production's lifecycle timer, and a terminal status closes it and records a
+    ``workflow.run`` metric (MAD-001 §49-50). No-op when the services container
+    has no metrics store configured.
+    """
+    services = get_activity_services()
+    await asyncio.to_thread(services.upsert_workflow_run, record)
+    metrics = services.metrics
+    if metrics is None:
+        return
+    if record.status == "running":
+        metrics.record_production_start(record.production_id)
+    elif record.status in ("completed", "failed", "cancelled"):
+        ok = record.status == "completed"
+        duration_ms = metrics.record_production_completed(record.production_id)
+        metrics.record(
+            "workflow.run",
+            component="workflow",
+            status="ok" if ok else "error",
+            production_id=record.production_id,
+            workflow_id=record.workflow_id,
+            duration_ms=duration_ms,
+        )

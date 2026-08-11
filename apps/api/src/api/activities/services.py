@@ -87,9 +87,13 @@ class WorkflowServices:
         image_validator: ImageValidator | None = None,
         radio_registry: RadioAssetRegistry | None = None,
         visualizer_engine: VisualizerEngine | None = None,
+        metrics: Any | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self._session_factory = session_factory or create_session_factory(self.settings)
+        #: Phase 22 observability store (``None`` in tests that don't configure
+        #: one); lifecycle recording in ``record_workflow_run`` is a no-op then.
+        self.metrics = metrics
         if provider_registry is None and agent_runtime is None:
             provider_registry = build_provider_registry(self.settings)
         self.provider_registry = provider_registry
