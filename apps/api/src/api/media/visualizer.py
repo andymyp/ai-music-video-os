@@ -11,10 +11,21 @@ yields identical output, so the visualizer is always synchronized with the
 actual master audio (PRD-001 FR-018 / §24) rather than randomly animated.
 Sensitivity scales the normalized values and smoothing applies an exponential
 moving average across frames (MAD-001 §23 example config).
+
+Phase 15 adds the deterministic *Video Renderer* step (MAD-001 §23): per-frame
+transparent bar sprites (:meth:`VisualizerEngine.render_frames`) that FFmpeg
+composites over the radio display, and normalized→pixel geometry helpers
+(:func:`radio_overlay_pixels`, :func:`visualizer_region_pixels`,
+:func:`branding_pixels`) so the master composition is driven entirely by the
+persisted layout (TDD-001 §52).
 """
 from __future__ import annotations
 
+import binascii
+import struct
+import zlib
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from pydantic import BaseModel, Field
@@ -33,6 +44,31 @@ _DEFAULT_BAND_EDGES_HZ = [0.0, 150.0, 400.0, 1000.0, 4000.0]
 RADIO_SCALE = 0.34
 RADIO_POSITION = (0.5, 0.5)
 BRANDING_POSITION = (0.03, 0.03)
+
+
+def radio_overlay_pixels(layout: "VisualizerLayout", *, width: int, height: int) -> tuple[int, int, int, int]:
+    """Normalized layout → (x, y, w, h) pixels for the radio asset overlay.
+
+    The radio is a square sized at ``radio_scale`` × frame *width*, centered on
+    ``radio_position`` (TDD-001 §52). Deterministic and testable.
+    """
+    size = round(layout.radio_scale * width)
+    x = round(layout.radio_position[0] * width - size / 2)
+    y = round(layout.radio_position[1] * height - size / 2)
+    return x, y, size, size
+
+
+def visualizer_region_pixels(layout: "VisualizerLayout", *, width: int, height: int) -> tuple[int, int, int, int]:
+    """Normalized ``visualizer_region`` → (x, y, w, h) pixels in the master frame."""
+    x0, y0, x1, y1 = layout.visualizer_region
+    left = round(x0 * width)
+    top = round(y0 * height)
+    return left, top, round(x1 * width) - left, round(y1 * height) - top
+
+
+def branding_pixels(layout: "VisualizerLayout", *, width: int, height: int) -> tuple[int, int]:
+    """Normalized ``branding_position`` anchor → (x, y) pixels (TDD-001 §52)."""
+    return round(layout.branding_position[0] * width), round(layout.branding_position[1] * height)
 
 
 class VisualizerLayout(BaseModel):
@@ -149,6 +185,74 @@ class VisualizerEngine:
             branding_position=(round(branding_position[0], 4), round(branding_position[1], 4)),
         )
         return VisualizerLayer(visualizer=visualizer_data, layout=layout)
+
+    # --- video renderer (MAD-001 §23: Visualizer Data → Video Renderer) -----
+
+    def render_frames(
+        self,
+        data: VisualizerData,
+        *,
+        width: int,
+        height: int,
+        bar_color: tuple[int, int, int] = (255, 255, 255),
+        opacity: float = 0.9,
+        gap_ratio: float = 0.4,
+    ) -> list[bytes]:
+        """Render each data frame as a transparent ``width``×``height`` PNG sprite.
+
+        One PNG per frame (indexed 1..N) so FFmpeg's image2 demuxer can overlay
+        them as a time-aligned video stream at ``data.fps``. Bars sit on the
+        bottom baseline, growing upward with the normalized band value; the rest
+        of the sprite is transparent so it composites over the radio's central
+        display area (TDD-001 §52). Deterministic: identical data → identical
+        bytes (TDD-001 §113).
+        """
+        if width < 1 or height < 1:
+            raise ValueError("visualizer sprite dimensions must be >= 1")
+        n = len(data.band_names) or 1
+        slot = width / n
+        bar_w = max(int(round(slot * (1.0 - gap_ratio))), 1)
+        bar_x0 = [round(i * slot + (slot - bar_w) / 2) for i in range(n)]
+        rgba = bytes(bar_color) + bytes([round(opacity * 255)])
+        bar_row = rgba * bar_w
+        frames: list[bytes] = []
+        for frame in data.frames:
+            buf = bytearray(width * height * 4)
+            for i, value in enumerate(frame):
+                bar_h = int(round(max(0.0, min(1.0, value)) * height))
+                if bar_h <= 0:
+                    continue
+                y0 = height - bar_h
+                for y in range(y0, height):
+                    offset = (y * width + bar_x0[i]) * 4
+                    buf[offset : offset + bar_w * 4] = bar_row
+            frames.append(self._encode_rgba(width, height, buf))
+        return frames
+
+    @staticmethod
+    def _png_chunk(typ: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + typ
+            + payload
+            + struct.pack(">I", binascii.crc32(typ + payload) & 0xFFFFFFFF)
+        )
+
+    @staticmethod
+    def _encode_rgba(width: int, height: int, buf: bytearray) -> bytes:
+        """Pack an RGBA buffer into a minimal 8-bit RGBA PNG (color type 6)."""
+        stride = width * 4
+        raw = bytearray()
+        for y in range(height):
+            raw.append(0)  # filter type: none
+            raw += buf[y * stride : (y + 1) * stride]
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + VisualizerEngine._png_chunk(b"IHDR", ihdr)
+            + VisualizerEngine._png_chunk(b"IDAT", zlib.compress(bytes(raw), 1))
+            + VisualizerEngine._png_chunk(b"IEND", b"")
+        )
 
     # --- FFT pipeline (MAD-001 §23) -----------------------------------------
 

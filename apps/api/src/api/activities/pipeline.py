@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+from pathlib import Path
 
 from temporalio import activity
 
@@ -39,7 +41,20 @@ from api.domain.audio import AudioAnalysis
 from api.domain.creative import CreativeConcept
 from api.domain.enums import ProductionMode
 from api.domain.outputs import ShortSegment
-from api.media.models import MediaExpectations, OverlaySpec, RenderRequest
+from api.domain.production import BrandingConfig
+from api.media import (
+    VisualizerLayer,
+    branding_pixels,
+    radio_overlay_pixels,
+    visualizer_region_pixels,
+)
+from api.media.models import (
+    MediaExpectations,
+    OverlaySpec,
+    RenderRequest,
+    VisualizerInput,
+    master_render_profile,
+)
 from api.storage.artifacts import ArtifactKind
 
 #: All pipeline activities a Temporal worker must register (Phase 10).
@@ -448,17 +463,99 @@ async def generate_visualizer(production_id: str) -> PipelineStageResult:
 
 # --- Rendering ----------------------------------------------------------------
 
+#: Candidate system fonts for the drawtext overlay (TDD-001 §53). The first one
+#: that exists is used; rendering is skipped when none is available.
+_BRANDING_FONT_CANDIDATES = (
+    Path("C:/Windows/Fonts/arial.ttf"),
+    Path("C:/Windows/Fonts/segoeui.ttf"),
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+)
+
+
+def _resolve_branding_font() -> Path | None:
+    for candidate in _BRANDING_FONT_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _visualizer_frames_dir(services, production_id: str) -> Path:
+    """Deterministic temp dir for the master's per-frame visualizer sprites.
+
+    Lives under the production's ``render`` subdirectory so it respects the
+    container's data root (tests inject isolated settings) and is transient —
+    never a canonical artifact (MAD-001 §44).
+    """
+    return services.artifact_service.subdir(production_id, "render") / "visualizer"
+
 
 @activity.defn
 async def render_master(production_id: str) -> PipelineStageResult:
-    """Compose background + radio + audio into the 16:9 master render."""
+    """Compose background + radio + visualizer + branding + audio (MAD-001 §24).
+
+    Geometry (radio position/scale, visualizer region, branding anchor) comes
+    from the persisted VISUALIZER_LAYER layout (TDD-001 §52); the per-frame bar
+    sprites are rendered from the visualizer data and overlaid inside the radio
+    (TDD-001 §52). Encoding honors the production's configured master
+    resolution/FPS through a render profile (PRD-001 §27, MAD-001 §56).
+    """
     services = get_activity_services()
     production = await asyncio.to_thread(services.get_production, production_id)
     config = await asyncio.to_thread(services.get_production_config, production_id)
-    request = RenderRequest(
-        background=services.artifact_service.path_for(production_id, ArtifactKind.BACKGROUND),
-        audio=services.artifact_service.path_for(production_id, ArtifactKind.AUDIO_MASTER),
-        overlays=[
+    profile = master_render_profile(config)
+    branding = config.branding if config else BrandingConfig()
+
+    # The visualizer layer pins the composition layout; productions without one
+    # (pre-Phase 14 data) fall back to the legacy centered radio placement.
+    layer: VisualizerLayer | None = None
+    if services.artifact_service.exists(production_id, ArtifactKind.VISUALIZER_LAYER):
+        layer = VisualizerLayer.model_validate_json(
+            await asyncio.to_thread(
+                services.artifact_service.read_text, production_id, ArtifactKind.VISUALIZER_LAYER
+            )
+        )
+
+    overlays: list[OverlaySpec] = []
+    visualizer: VisualizerInput | None = None
+    if layer is not None:
+        rx, ry, rw, rh = radio_overlay_pixels(layer.layout, width=profile.width, height=profile.height)
+        overlays.append(
+            OverlaySpec(
+                path=services.artifact_service.path_for(production_id, ArtifactKind.RADIO),
+                x=rx,
+                y=ry,
+                width=rw,
+                height=rh,
+                opacity=0.85,
+            )
+        )
+        if layer.visualizer.frames:
+            duration = await _master_duration_seconds(services, production_id, config)
+            vx, vy, vw, vh = visualizer_region_pixels(
+                layer.layout, width=profile.width, height=profile.height
+            )
+            frames_dir = _visualizer_frames_dir(services, production_id)
+            shutil.rmtree(frames_dir, ignore_errors=True)
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            for index, sprite in enumerate(
+                services.visualizer_engine.render_frames(
+                    layer.visualizer, width=vw, height=vh
+                ),
+                start=1,
+            ):
+                (frames_dir / f"{index:05d}.png").write_bytes(sprite)
+            visualizer = VisualizerInput(
+                frames_dir=frames_dir,
+                fps=layer.visualizer.fps,
+                region_x=vx,
+                region_y=vy,
+                region_width=vw,
+                region_height=vh,
+                duration_seconds=duration,
+            )
+    else:
+        overlays.append(
             OverlaySpec(
                 path=services.artifact_service.path_for(production_id, ArtifactKind.RADIO),
                 x=720,
@@ -467,13 +564,43 @@ async def render_master(production_id: str) -> PipelineStageResult:
                 height=480,
                 opacity=0.85,
             )
-        ],
-        branding_text=production.branding_text,
-        branding_size=config.branding.font_size if config else 48,
+        )
+
+    bx, by = (
+        branding_pixels(layer.layout, width=profile.width, height=profile.height)
+        if layer is not None
+        else (0, 0)
+    )
+    font = _resolve_branding_font()
+    request = RenderRequest(
+        background=services.artifact_service.path_for(production_id, ArtifactKind.BACKGROUND),
+        audio=services.artifact_service.path_for(production_id, ArtifactKind.AUDIO_MASTER),
+        overlays=overlays,
+        visualizer=visualizer,
+        branding_text=(production.branding_text or branding.text) or None,
+        branding_font=font,
+        branding_x=bx,
+        branding_y=by,
+        branding_size=branding.font_size,
+        branding_opacity=branding.opacity,
         output_path=services.artifact_service.path_for(production_id, ArtifactKind.MASTER_VIDEO),
     )
-    output = await services.media_engine.render_master(request)
+    output = await services.media_engine.render_master(request, profile=profile)
     return _result("render_master", f"master {output.name}")
+
+
+async def _master_duration_seconds(services, production_id: str, config) -> float | None:
+    """Master audio duration for bounding the visualizer overlay (TDD-001 §52)."""
+    if services.artifact_service.exists(production_id, ArtifactKind.AUDIO_ANALYSIS):
+        analysis = AudioAnalysis.model_validate_json(
+            await asyncio.to_thread(
+                services.artifact_service.read_text, production_id, ArtifactKind.AUDIO_ANALYSIS
+            )
+        )
+        return analysis.duration_seconds
+    if config is not None:
+        return float(config.long_form_duration_minutes * 60)
+    return None
 
 
 @activity.defn

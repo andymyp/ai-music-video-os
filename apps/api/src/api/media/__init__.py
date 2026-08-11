@@ -17,9 +17,15 @@ from api.media.ffmpeg import (
 )
 from api.media.mastering import AudioMasteringEngine, AudioMasterReport
 from api.media.visualizer import (
+    BRANDING_POSITION,
+    RADIO_POSITION,
+    RADIO_SCALE,
     VisualizerEngine,
     VisualizerLayer,
     VisualizerLayout,
+    branding_pixels,
+    radio_overlay_pixels,
+    visualizer_region_pixels,
 )
 from api.media.models import (
     MASTER_PROFILE,
@@ -31,6 +37,8 @@ from api.media.models import (
     RenderProfile,
     RenderRequest,
     ValidationCheck,
+    VisualizerInput,
+    master_render_profile,
 )
 
 __all__ = [
@@ -50,7 +58,9 @@ __all__ = [
     "MASTER_PROFILE",
     "SHORT_PROFILE",
     "RenderRequest",
+    "VisualizerInput",
     "OverlaySpec",
+    "master_render_profile",
     "MediaProbe",
     "MediaExpectations",
     "MediaValidationResult",

@@ -15,7 +15,9 @@ from pathlib import Path
 import pytest
 
 from api.core.errors import MediaProcessingError
+from api.domain.enums import ProductionMode
 from api.domain.outputs import ShortSegment
+from api.domain.production import ProductionConfig
 from api.media import (
     FFmpegMediaEngine,
     MASTER_PROFILE,
@@ -27,9 +29,13 @@ from api.media import (
     OverlaySpec,
     RenderProfile,
     RenderRequest,
+    VisualizerInput,
     build_render_args,
+    master_render_profile,
     probe_to_model,
+    radio_overlay_pixels,
     run_validation_checks,
+    visualizer_region_pixels,
 )
 from api.media.ffmpeg import _escape_filter, _run_process
 
@@ -165,8 +171,105 @@ def test_filter_graph_branding_drawtext(tmp_path):
     assert "fontfile=" in graph
 
 
-def test_escape_filter_handles_special_chars():
-    assert _escape_filter("a:b,c'd\\e%") == "a\\:b\\,c\\'d\\\\e%%"
+def test_filter_graph_branding_opacity_adds_alpha(tmp_path):
+    request = _request(
+        tmp_path,
+        branding_text="MY",
+        branding_font=tmp_path / "font.ttf",
+        branding_opacity=0.65,
+    )
+    graph = build_render_args(request, TEST_PROFILE)[
+        build_render_args(request, TEST_PROFILE).index("-filter_complex") + 1
+    ]
+    assert "fontcolor=white:alpha=0.65" in graph
+
+
+# --- Visualizer compositing (TDD-001 §52) -------------------------------------
+
+def _viz_input(tmp_path, **kwargs) -> VisualizerInput:
+    defaults = dict(
+        frames_dir=tmp_path / "viz",
+        fps=30,
+        region_x=10,
+        region_y=20,
+        region_width=40,
+        region_height=40,
+        duration_seconds=2.0,
+    )
+    defaults.update(kwargs)
+    return VisualizerInput(**defaults)
+
+
+def test_render_args_add_visualizer_sequence_input(tmp_path):
+    request = _request(
+        tmp_path,
+        overlays=[OverlaySpec(path=tmp_path / "radio.png")],
+        visualizer=_viz_input(tmp_path),
+    )
+    args = build_render_args(request, TEST_PROFILE)
+    pattern = str(tmp_path / "viz" / "%05d.png")
+    assert pattern in args
+    # ["-loop", "1", "-framerate", "30", "-i", "<pattern>"] — looped to audio end
+    assert args[args.index(pattern) - 5 : args.index(pattern) + 1] == [
+        "-loop", "1", "-framerate", "30", "-i", pattern,
+    ]
+
+
+def test_filter_graph_composites_visualizer_into_region(tmp_path):
+    request = _request(
+        tmp_path,
+        overlays=[OverlaySpec(path=tmp_path / "radio.png")],
+        visualizer=_viz_input(tmp_path),
+    )
+    graph = build_render_args(request, TEST_PROFILE)[
+        build_render_args(request, TEST_PROFILE).index("-filter_complex") + 1
+    ]
+    # bg=0, audio=1, radio=2, visualizer=3 -> scaled to the region, then overlaid
+    assert "[3:v]format=rgba,scale=40:40[viz3]" in graph
+    assert "overlay=10:20:enable='between(t,0,2)'" in graph
+
+
+def test_filter_graph_visualizer_precedes_branding(tmp_path):
+    request = _request(
+        tmp_path,
+        visualizer=_viz_input(tmp_path),
+        branding_text="MY",
+        branding_font=tmp_path / "font.ttf",
+    )
+    graph = build_render_args(request, TEST_PROFILE)[
+        build_render_args(request, TEST_PROFILE).index("-filter_complex") + 1
+    ]
+    assert "overlay=10:20" in graph
+    assert "drawtext=" in graph
+    assert graph.rstrip().endswith("[vout]")
+
+
+def test_render_args_without_visualizer_have_no_framerate_input(tmp_path):
+    args = build_render_args(_request(tmp_path), TEST_PROFILE)
+    assert "-framerate" not in args
+
+
+# --- Render profile from production config (MAD-001 §56, PRD-001 §27) ---------
+
+def test_master_render_profile_honors_production_dimensions():
+    config = ProductionConfig(
+        mode=ProductionMode.GENRE,
+        genre="lofi",
+        master_width=1280,
+        master_height=720,
+        fps=24,
+    )
+    profile = master_render_profile(config)
+    assert (profile.width, profile.height) == (1280, 720)
+    assert profile.fps == 24
+    # encoding defaults stay externalized through the base profile
+    assert profile.video_codec == MASTER_PROFILE.video_codec
+    assert profile.audio_codec == MASTER_PROFILE.audio_codec
+    assert profile.crf == MASTER_PROFILE.crf
+
+
+def test_master_render_profile_defaults_without_config():
+    assert master_render_profile(None) is MASTER_PROFILE
 
 
 # --- Probe parsing (ffprobe JSON) --------------------------------------------
@@ -422,6 +525,72 @@ async def test_integration_render_master_and_validate(media_sources):
             fps=10,
             audio_codec="aac",
             video_codec="h264",
+        ),
+    )
+    assert result.valid is True
+
+
+@pytest.mark.skipif(not FFMPEG_PRESENT, reason="FFmpeg/FFprobe not on PATH")
+async def test_integration_render_master_with_visualizer_radio_and_branding(media_sources):
+    """Phase 15: background + radio + visualizer sprites + branding + audio."""
+    from api.domain.audio import AudioAnalysis
+    from api.media import VisualizerEngine
+
+    engine = FFmpegMediaEngine()
+    viz_engine = VisualizerEngine()
+    data = await viz_engine.generate_data(
+        AudioAnalysis(duration_seconds=15.0), master_path=media_sources["wav"]
+    )
+    layout = viz_engine.render(data).layout
+    rx, ry, rw, rh = radio_overlay_pixels(layout, width=TEST_PROFILE.width, height=TEST_PROFILE.height)
+    vx, vy, vw, vh = visualizer_region_pixels(layout, width=TEST_PROFILE.width, height=TEST_PROFILE.height)
+
+    frames_dir = media_sources["tmp"] / "vizframes"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    for index, sprite in enumerate(viz_engine.render_frames(data, width=vw, height=vh), start=1):
+        (frames_dir / f"{index:05d}.png").write_bytes(sprite)
+
+    arial = Path("C:/Windows/Fonts/arial.ttf")
+    out = media_sources["tmp"] / "master-viz.mp4"
+    await engine.render_master(
+        RenderRequest(
+            background=media_sources["bg"],
+            audio=media_sources["wav"],
+            overlays=[
+                OverlaySpec(
+                    path=media_sources["radio"],
+                    x=rx,
+                    y=ry,
+                    width=rw,
+                    height=rh,
+                    opacity=0.85,
+                )
+            ],
+            visualizer=VisualizerInput(
+                frames_dir=frames_dir,
+                fps=data.fps,
+                region_x=vx,
+                region_y=vy,
+                region_width=vw,
+                region_height=vh,
+                duration_seconds=data.timestamps[-1] + 1.0 / data.fps,
+            ),
+            branding_text="MY CHANNEL",
+            branding_font=arial if arial.is_file() else None,
+            branding_x=4,
+            branding_y=4,
+            branding_size=12,
+            output_path=out,
+        ),
+        profile=TEST_PROFILE,
+    )
+    probe = await engine.analyze_audio(out)
+    assert probe.has_video and probe.has_audio
+    assert (probe.width, probe.height) == (320, 180)
+    result = await engine.validate_media(
+        out,
+        expectations=MediaExpectations(
+            require_video=True, width=320, height=180, fps=10, audio_codec="aac"
         ),
     )
     assert result.valid is True

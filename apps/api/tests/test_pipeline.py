@@ -82,17 +82,21 @@ class FakeMediaEngine:
 
     def __init__(self) -> None:
         self.rendered: list[Path] = []
+        self.requests: list[RenderRequest] = []
+        self.profiles: list[object] = []
 
     async def render_master(self, request, profile=None) -> Path:
-        return await self._render(request)
+        return await self._render(request, profile)
 
     async def render_short(self, request, profile=None) -> Path:
-        return await self._render(request)
+        return await self._render(request, profile)
 
-    async def _render(self, request) -> Path:
+    async def _render(self, request, profile=None) -> Path:
         request.output_path.parent.mkdir(parents=True, exist_ok=True)
         request.output_path.write_bytes(b"FAKE-MP4")
         self.rendered.append(request.output_path)
+        self.requests.append(request)
+        self.profiles.append(profile)
         return request.output_path
 
     async def validate_media(self, path, *, expectations=None) -> MediaValidationResult:
@@ -382,6 +386,36 @@ async def test_render_master_writes_video(services, session_factory):
     await run_pipeline(prod.id, stop_after="render_master")
     assert services.artifact_service.exists(prod.id, ArtifactKind.MASTER_VIDEO)
     assert services.artifact_service.read(prod.id, ArtifactKind.MASTER_VIDEO) == b"FAKE-MP4"
+
+
+async def test_render_master_composites_visualizer_from_layout(services, session_factory):
+    """TDD-001 §52: radio/visualizer/branding geometry comes from the layout."""
+    prod = _make_production(session_factory)
+    await run_pipeline(prod.id, stop_after="render_master")
+
+    request = services.media_engine.requests[-1]
+    # radio overlay positioned by the persisted layout (0.34 scale on 1920x1080)
+    radio = request.overlays[0]
+    assert (radio.x, radio.y, radio.width, radio.height) == (634, 214, 653, 653)
+
+    # visualizer sprites rendered inside the radio's display region
+    assert request.visualizer is not None
+    assert request.visualizer.region_width == 456
+    assert request.visualizer.region_height == 258
+    sprites = sorted(request.visualizer.frames_dir.glob("*.png"))
+    visualizer = VisualizerData.model_validate_json(
+        services.artifact_service.read_text(prod.id, ArtifactKind.VISUALIZER_DATA)
+    )
+    assert len(sprites) == len(visualizer.frames)  # one sprite per data frame
+    assert sprites[0].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    # branding anchors top-left per the layout
+    assert request.branding_x == 58 and request.branding_y == 32
+
+    # the render profile honors the production's configured master size/FPS
+    profile = services.media_engine.profiles[-1]
+    assert (profile.width, profile.height) == (1920, 1080)
+    assert profile.fps == 30
 
 
 async def test_validate_master(services, session_factory):

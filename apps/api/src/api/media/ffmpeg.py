@@ -59,6 +59,11 @@ def build_render_args(request: RenderRequest, profile: RenderProfile) -> list[st
     args += ["-i", str(request.audio)]
     for overlay in request.overlays:
         args += ["-loop", "1", "-i", str(overlay.path)]
+    if request.visualizer is not None:
+        # Visualizer sprites are a numbered PNG sequence at the data's fps,
+        # looped so the bars last the whole audio (overlay enable bounds them).
+        args += ["-loop", "1", "-framerate", str(request.visualizer.fps)]
+        args += ["-i", str(request.visualizer.frames_dir / "%05d.png")]
 
     args += ["-filter_complex", _build_filter_graph(request, profile)]
     args += ["-map", "[vout]", "-map", "1:a"]
@@ -111,13 +116,33 @@ def _build_filter_graph(request: RenderRequest, profile: RenderProfile) -> str:
         out = "vout" if final else f"o{index}"
         parts.append(f"[{current}][{src}]overlay={overlay.x}:{overlay.y}[{out}]")
         current = out
+    if request.visualizer is not None:
+        viz = request.visualizer
+        viz_index = 2 + len(request.overlays)
+        viz_src = f"viz{viz_index}"
+        # Bars are composited into the radio's central display area (TDD-001
+        # §52), bounded to the audio duration so the loop never leaks.
+        parts.append(
+            f"[{viz_index}:v]format=rgba,"
+            f"scale={viz.region_width}:{viz.region_height}[{viz_src}]"
+        )
+        enable = (
+            f":enable='between(t,0,{_fmt(viz.duration_seconds)})'"
+            if viz.duration_seconds is not None
+            else ""
+        )
+        has_branding = request.branding_font is not None
+        out = "vout" if not has_branding else f"o{viz_index}"
+        parts.append(f"[{current}][{viz_src}]overlay={viz.region_x}:{viz.region_y}{enable}[{out}]")
+        current = out
     if request.branding_font is not None:
         text = _escape_filter(request.branding_text or "")
         fontfile = _escape_filter(str(request.branding_font))
+        alpha = f":alpha={request.branding_opacity:.2f}" if request.branding_opacity is not None else ""
         parts.append(
             f"[{current}]drawtext=text='{text}':fontfile='{fontfile}'"
             f":x={request.branding_x}:y={request.branding_y}"
-            f":fontsize={request.branding_size}:fontcolor=white[vout]"
+            f":fontsize={request.branding_size}:fontcolor=white{alpha}[vout]"
         )
     elif current != "vout":
         parts.append(f"[{current}]null[vout]")

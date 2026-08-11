@@ -7,15 +7,24 @@ layout (TDD-001 §46, §52, §126).
 from __future__ import annotations
 
 import math
+import struct
 import wave
+import zlib
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from api.core.errors import MediaProcessingError
-from api.domain.audio import AudioAnalysis
-from api.media import VisualizerEngine, VisualizerLayer, VisualizerLayout
+from api.domain.audio import AudioAnalysis, VisualizerData
+from api.media import (
+    VisualizerEngine,
+    VisualizerLayer,
+    VisualizerLayout,
+    branding_pixels,
+    radio_overlay_pixels,
+    visualizer_region_pixels,
+)
 from api.media.visualizer import (
     BRANDING_POSITION,
     RADIO_POSITION,
@@ -192,3 +201,109 @@ async def test_generate_data_rejects_empty_master(tmp_path):
 async def test_generate_data_rejects_missing_master(tmp_path):
     with pytest.raises((MediaProcessingError, OSError)):
         await _engine().generate_data(_analysis(1.0), master_path=tmp_path / "nope.wav")
+
+
+# --- Phase 15: layout -> pixel geometry (TDD-001 §52) -------------------------
+
+
+def _default_layout() -> VisualizerLayout:
+    return VisualizerLayout(
+        radio_position=RADIO_POSITION,
+        radio_scale=RADIO_SCALE,
+        visualizer_region=(0.381, 0.381, 0.619, 0.619),
+        visualizer_style="bars",
+        branding_position=BRANDING_POSITION,
+    )
+
+
+def test_radio_overlay_pixels_centers_scaled_square():
+    """The radio is a radio_scale×frame-width square centered on its position."""
+    x, y, w, h = radio_overlay_pixels(_default_layout(), width=1920, height=1080)
+    assert (w, h) == (653, 653)  # round(0.34 * 1920)
+    assert x + w // 2 == 960  # centered horizontally
+    assert y + h // 2 == 540  # centered vertically
+
+
+def test_visualizer_region_pixels_match_layout():
+    x, y, w, h = visualizer_region_pixels(_default_layout(), width=1920, height=1080)
+    assert (x, y, w, h) == (732, 411, 456, 258)
+
+
+def test_branding_pixels_scaled_from_anchor():
+    assert branding_pixels(_default_layout(), width=1920, height=1080) == (58, 32)
+
+
+def test_region_geometry_is_inside_the_radio_square():
+    layout = _default_layout()
+    rx, ry, rw, rh = radio_overlay_pixels(layout, width=1920, height=1080)
+    vx, vy, vw, vh = visualizer_region_pixels(layout, width=1920, height=1080)
+    assert rx <= vx and vx + vw <= rx + rw  # bars render in the radio display
+    assert ry <= vy and vy + vh <= ry + rh
+
+
+# --- Phase 15: bar sprite rendering (MAD-001 §23 Video Renderer) --------------
+
+
+def _sprite_data() -> VisualizerData:
+    return VisualizerData(
+        style="bars",
+        position="radio-center",
+        fps=30,
+        band_names=BAND_NAMES,
+        frames=[[0.0] * 5, [0.5] * 5, [1.0] * 5],
+        timestamps=[0.0, 0.033, 0.067],
+    )
+
+
+def _png_idat(png: bytes) -> bytes:
+    pos = 8
+    while pos < len(png):
+        length = struct.unpack(">I", png[pos : pos + 4])[0]
+        typ = png[pos + 4 : pos + 8]
+        if typ == b"IDAT":
+            return zlib.decompress(png[pos + 8 : pos + 8 + length])
+        pos += 12 + length
+    raise AssertionError("no IDAT chunk")
+
+
+def _opaque_pixels(png: bytes, width: int, height: int) -> int:
+    raw = _png_idat(png)
+    stride = width * 4 + 1
+    count = 0
+    for y in range(height):
+        row = raw[y * stride + 1 : (y + 1) * stride]  # skip filter byte
+        for x in range(width):
+            if row[x * 4 + 3]:
+                count += 1
+    return count
+
+
+def test_render_frames_produces_one_valid_png_per_frame():
+    sprites = _engine().render_frames(_sprite_data(), width=100, height=60)
+    assert len(sprites) == 3
+    for png in sprites:
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+        assert struct.unpack(">II", png[16:24]) == (100, 60)
+
+
+def test_render_frames_is_deterministic():
+    engine = _engine()
+    data = _sprite_data()
+    assert engine.render_frames(data, width=100, height=60) == engine.render_frames(
+        data, width=100, height=60
+    )
+
+
+def test_render_frames_bar_height_tracks_value():
+    """Zero values draw no bars; higher values draw taller (more opaque) bars."""
+    engine = _engine()
+    data = _sprite_data()
+    sprites = engine.render_frames(data, width=100, height=60)
+    opaque = [_opaque_pixels(png, 100, 60) for png in sprites]
+    assert opaque[0] == 0  # all-zero frame -> fully transparent
+    assert opaque[0] < opaque[1] < opaque[2]  # 0.5 < 1.0 bars
+
+
+def test_render_frames_rejects_nonpositive_dimensions():
+    with pytest.raises(ValueError):
+        _engine().render_frames(_sprite_data(), width=0, height=60)

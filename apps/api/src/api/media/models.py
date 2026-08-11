@@ -12,6 +12,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
 
 from api.domain.outputs import ShortSegment
+from api.domain.production import ProductionConfig
 
 
 class RenderProfile(BaseModel):
@@ -74,24 +75,68 @@ class OverlaySpec(BaseModel):
     opacity: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class VisualizerInput(BaseModel):
+    """Per-frame visualizer sprites composited over the render (MAD-001 §23).
+
+    ``frames_dir`` holds one ``%05d.png`` bar sprite per visualizer frame,
+    rendered at ``fps``; FFmpeg reads them as a time-aligned video stream
+    positioned/scaled to ``region_*`` (TDD-001 §52). ``duration_seconds`` bounds
+    the overlay with ``enable=between(t,0,D)`` so sprites never leak past the
+    audio.
+    """
+
+    frames_dir: Path
+    fps: int = Field(default=30, gt=0)
+    region_x: int = Field(default=0, ge=0)
+    region_y: int = Field(default=0, ge=0)
+    region_width: int = Field(default=0, gt=0)
+    region_height: int = Field(default=0, gt=0)
+    duration_seconds: float | None = Field(default=None, gt=0)
+
+
 class RenderRequest(BaseModel):
     """Inputs for one deterministic render (MAD-001 §24, §27).
 
-    ``background`` and ``audio`` are required; ``overlays`` (radio/visualizer)
-    and ``branding_text`` are composited on top. For short renders, ``segment``
-    trims the audio to the selected clip (TDD-001 §129).
+    ``background`` and ``audio`` are required; ``overlays`` (radio), a
+    ``visualizer`` sprite stream, and ``branding_text`` are composited on top
+    (TDD-001 §49-53). For short renders, ``segment`` trims the audio to the
+    selected clip (TDD-001 §129).
     """
 
     background: Path
     audio: Path
     overlays: list[OverlaySpec] = Field(default_factory=list)
+    visualizer: VisualizerInput | None = None
     branding_text: str | None = None
     branding_font: Path | None = None
     branding_x: int = 0
     branding_y: int = 0
     branding_size: int = Field(default=48, gt=0)
+    branding_opacity: float | None = Field(default=None, ge=0.0, le=1.0)
     output_path: Path
     segment: ShortSegment | None = None
+
+
+def master_render_profile(
+    config: ProductionConfig | None,
+    base: RenderProfile = MASTER_PROFILE,
+) -> RenderProfile:
+    """Render profile honoring a production's configured master size/FPS.
+
+    The encoding defaults (codec, crf, pixel format) stay externalized through
+    ``base`` (MAD-001 §56); only the resolution/FPS the user configured on the
+    production are applied (PRD-001 §27 long-form configurability).
+    """
+    if config is None:
+        return base
+    return base.model_copy(
+        update={
+            "name": base.name,
+            "width": config.master_width,
+            "height": config.master_height,
+            "fps": config.fps,
+        }
+    )
 
 
 class MediaProbe(BaseModel):
