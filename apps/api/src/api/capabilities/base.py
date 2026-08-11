@@ -15,6 +15,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from api.core.secrets import is_valid_reference
+
 # The five provider cost modes from MAD-001 §59 / PRD-001 §46.
 ProviderMode = Literal["mock", "free", "balanced", "quality", "custom"]
 
@@ -55,4 +57,23 @@ class ProviderConfig(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("provider_id must not be empty")
+        return value
+
+    @field_validator("credentials_reference")
+    @classmethod
+    def _credentials_reference(cls, value: str | None) -> str | None:
+        """A reference is an env-var *name*, never the secret itself (TDD §79).
+
+        Rejecting anything that is not a well-formed env-var name makes it
+        structurally impossible to store a literal API key or a path in
+        configuration — secrets only ever arrive at call time via
+        :func:`api.core.secrets.resolve_credentials`.
+        """
+        if value is None:
+            return value
+        if not is_valid_reference(value):
+            raise ValueError(
+                "credentials_reference must be an env-var name (e.g. OPENAI_API_KEY), "
+                "never a secret value"
+            )
         return value
