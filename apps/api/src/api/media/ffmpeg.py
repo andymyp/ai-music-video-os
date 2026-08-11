@@ -139,9 +139,16 @@ def _build_filter_graph(request: RenderRequest, profile: RenderProfile) -> str:
         text = _escape_filter(request.branding_text or "")
         fontfile = _escape_filter(str(request.branding_font))
         alpha = f":alpha={request.branding_opacity:.2f}" if request.branding_opacity is not None else ""
+        # "center" anchors the text horizontally on the frame midpoint (used for
+        # the short's bottom-center branding); anything else keeps the explicit
+        # pixel anchor (TDD-001 §52, §128).
+        if request.branding_align == "center":
+            x_expr = "(w-text_w)/2"
+        else:
+            x_expr = str(request.branding_x)
         parts.append(
             f"[{current}]drawtext=text='{text}':fontfile='{fontfile}'"
-            f":x={request.branding_x}:y={request.branding_y}"
+            f":x={x_expr}:y={request.branding_y}"
             f":fontsize={request.branding_size}:fontcolor=white{alpha}[vout]"
         )
     elif current != "vout":

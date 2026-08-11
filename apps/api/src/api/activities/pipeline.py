@@ -46,6 +46,8 @@ from api.media import (
     VisualizerLayer,
     branding_pixels,
     radio_overlay_pixels,
+    slice_visualizer,
+    vertical_layout,
     visualizer_region_pixels,
 )
 from api.media.models import (
@@ -54,6 +56,7 @@ from api.media.models import (
     RenderRequest,
     VisualizerInput,
     master_render_profile,
+    short_render_profile,
 )
 from api.storage.artifacts import ArtifactKind
 
@@ -432,6 +435,7 @@ async def generate_visualizer(production_id: str) -> PipelineStageResult:
             services.artifact_service.read_text, production_id, ArtifactKind.AUDIO_ANALYSIS
         )
     )
+    config = await asyncio.to_thread(services.get_production_config, production_id)
     strategy = await asyncio.to_thread(services.get_visual_strategy, production_id)
     style = (strategy.visualizer_style if strategy else None) or "bars"
     master_path = services.artifact_service.path_for(production_id, ArtifactKind.AUDIO_MASTER)
@@ -442,7 +446,14 @@ async def generate_visualizer(production_id: str) -> PipelineStageResult:
         style=style,
         position="radio-center",
     )
-    layer = services.visualizer_engine.render(visualizer)
+    # The layout's visualizer region is the radio's inner 70% computed in the
+    # production's master pixel space, so the region always fits the radio
+    # square for the configured resolution (TDD-001 §52, §128).
+    layer = services.visualizer_engine.render(
+        visualizer,
+        frame_width=config.master_width if config else 1920,
+        frame_height=config.master_height if config else 1080,
+    )
     await asyncio.to_thread(
         services.artifact_service.write_text,
         production_id,
@@ -640,6 +651,7 @@ async def select_short_segment(production_id: str) -> PipelineStageResult:
             max_duration_seconds=60.0,
         ),
     )
+    await _validate_short_segment(services, production_id, segment, config)
     await asyncio.to_thread(
         services.artifact_service.write_text,
         production_id,
@@ -652,19 +664,133 @@ async def select_short_segment(production_id: str) -> PipelineStageResult:
     )
 
 
+async def _validate_short_segment(services, production_id: str, segment: ShortSegment, config) -> None:
+    """Reject a short segment that cannot be rendered (MAD-001 §26).
+
+    The clip must be structurally valid (non-negative start, positive duration),
+    within the platform short-form ceiling (MAD-001 §25: 30-60s target, bounded
+    at 60s), and lie entirely inside the master audio — a window past the end
+    would render silence/tail frames. The selection agent already clamps to the
+    audio length, so no floor is imposed: a short master yields a short clip.
+    """
+    if segment.start_seconds < 0 or segment.duration_seconds <= 0:
+        raise QualityCheckError(
+            f"short segment invalid for production {production_id!r}: "
+            f"start {segment.start_seconds:g}s / {segment.duration_seconds:g}s"
+        )
+    if segment.duration_seconds > 60.0:
+        raise QualityCheckError(
+            f"short segment out of bounds for production {production_id!r}: "
+            f"duration {segment.duration_seconds:g}s exceeds the 60s platform ceiling"
+        )
+    if services.artifact_service.exists(production_id, ArtifactKind.AUDIO_ANALYSIS):
+        analysis = AudioAnalysis.model_validate_json(
+            await asyncio.to_thread(
+                services.artifact_service.read_text, production_id, ArtifactKind.AUDIO_ANALYSIS
+            )
+        )
+        master_duration = analysis.duration_seconds
+    elif config is not None:
+        master_duration = float(config.long_form_duration_minutes * 60)
+    else:
+        master_duration = None
+    if master_duration is not None and segment.start_seconds + segment.duration_seconds > master_duration + 1.0:
+        raise QualityCheckError(
+            f"short segment exceeds master for production {production_id!r}: "
+            f"end {segment.start_seconds + segment.duration_seconds:g}s > {master_duration:g}s"
+        )
+
+
+def _short_frames_dir(services, production_id: str) -> Path:
+    """Deterministic temp dir for the short's per-frame visualizer sprites.
+
+    Lives under the production's ``render`` subdirectory like the master's
+    sprites but in its own subdir so a short render never clobbers master
+    sprites mid-render. Transient — never a canonical artifact (MAD-001 §44).
+    """
+    return services.artifact_service.subdir(production_id, "render") / "short-visualizer"
+
+
 @activity.defn
 async def render_short(production_id: str) -> PipelineStageResult:
-    """Trim the selected segment into the 9:16 short render."""
+    """Trim the selected segment into the 9:16 short render (MAD-001 §25-27).
+
+    The short reuses the master's visualizer data — never regenerates
+    independent music (PRD-001 §24) — sliced to the segment window so the bars
+    stay synchronized with the trimmed audio (TDD-001 §129), and composes the
+    dedicated vertical layout: radio in the upper third, visualizer inside its
+    display area, branding bottom-center (MAD-001 §27, TDD-001 §128). Encoding
+    honors the production's configured short resolution/FPS (PRD-001 §28,
+    MAD-001 §56).
+    """
     services = get_activity_services()
+    production = await asyncio.to_thread(services.get_production, production_id)
+    config = await asyncio.to_thread(services.get_production_config, production_id)
+    profile = short_render_profile(config)
+    branding = config.branding if config else BrandingConfig()
     segment = ShortSegment.model_validate_json(
         await asyncio.to_thread(
             services.artifact_service.read_text, production_id, ArtifactKind.SHORT_SEGMENT
         )
     )
-    request = RenderRequest(
-        background=services.artifact_service.path_for(production_id, ArtifactKind.BACKGROUND),
-        audio=services.artifact_service.path_for(production_id, ArtifactKind.AUDIO_MASTER),
-        overlays=[
+
+    # The visualizer layer pins the composition layout; productions without one
+    # (pre-Phase 14 data) fall back to the legacy centered radio placement.
+    layer: VisualizerLayer | None = None
+    if services.artifact_service.exists(production_id, ArtifactKind.VISUALIZER_LAYER):
+        layer = VisualizerLayer.model_validate_json(
+            await asyncio.to_thread(
+                services.artifact_service.read_text, production_id, ArtifactKind.VISUALIZER_LAYER
+            )
+        )
+
+    overlays: list[OverlaySpec] = []
+    visualizer: VisualizerInput | None = None
+    if layer is not None:
+        # Dedicated 9:16 composition (MAD-001 §27); style comes from the visual
+        # strategy carried by the persisted layer.
+        layout = vertical_layout(layer.visualizer.style, width=profile.width, height=profile.height)
+        rx, ry, rw, rh = radio_overlay_pixels(layout, width=profile.width, height=profile.height)
+        overlays.append(
+            OverlaySpec(
+                path=services.artifact_service.path_for(production_id, ArtifactKind.RADIO),
+                x=rx,
+                y=ry,
+                width=rw,
+                height=rh,
+                opacity=0.85,
+            )
+        )
+        if layer.visualizer.frames:
+            vx, vy, vw, vh = visualizer_region_pixels(
+                layout, width=profile.width, height=profile.height
+            )
+            # The segment's window of the master's visualizer, timestamps rebased
+            # to short t=0 (TDD-001 §129) — never regenerated independent music.
+            sliced = slice_visualizer(
+                layer.visualizer,
+                start_seconds=segment.start_seconds,
+                duration_seconds=segment.duration_seconds,
+            )
+            frames_dir = _short_frames_dir(services, production_id)
+            shutil.rmtree(frames_dir, ignore_errors=True)
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            for index, sprite in enumerate(
+                services.visualizer_engine.render_frames(sliced, width=vw, height=vh),
+                start=1,
+            ):
+                (frames_dir / f"{index:05d}.png").write_bytes(sprite)
+            visualizer = VisualizerInput(
+                frames_dir=frames_dir,
+                fps=sliced.fps,
+                region_x=vx,
+                region_y=vy,
+                region_width=vw,
+                region_height=vh,
+                duration_seconds=segment.duration_seconds,
+            )
+    else:
+        overlays.append(
             OverlaySpec(
                 path=services.artifact_service.path_for(production_id, ArtifactKind.RADIO),
                 x=270,
@@ -673,11 +799,30 @@ async def render_short(production_id: str) -> PipelineStageResult:
                 height=540,
                 opacity=0.85,
             )
-        ],
+        )
+
+    font = _resolve_branding_font()
+    bx, by = (
+        branding_pixels(layout, width=profile.width, height=profile.height)
+        if layer is not None
+        else (0, 0)
+    )
+    request = RenderRequest(
+        background=services.artifact_service.path_for(production_id, ArtifactKind.BACKGROUND),
+        audio=services.artifact_service.path_for(production_id, ArtifactKind.AUDIO_MASTER),
+        overlays=overlays,
+        visualizer=visualizer,
+        branding_text=(production.branding_text or branding.text) or None,
+        branding_font=font,
+        branding_x=bx,
+        branding_y=by,
+        branding_size=branding.font_size,
+        branding_opacity=branding.opacity,
+        branding_align="center",
         output_path=services.artifact_service.path_for(production_id, ArtifactKind.SHORT_VIDEO),
         segment=segment,
     )
-    output = await services.media_engine.render_short(request)
+    output = await services.media_engine.render_short(request, profile=profile)
     return _result("render_short", f"short {output.name}")
 
 
@@ -685,14 +830,15 @@ async def render_short(production_id: str) -> PipelineStageResult:
 async def validate_short(production_id: str) -> PipelineStageResult:
     """Probe the short render against the short profile expectations."""
     services = get_activity_services()
+    config = await asyncio.to_thread(services.get_production_config, production_id)
     path = services.artifact_service.path_for(production_id, ArtifactKind.SHORT_VIDEO)
     result = await services.media_engine.validate_media(
         path,
         expectations=MediaExpectations(
             require_video=True,
-            width=1080,
-            height=1920,
-            fps=30,
+            width=config.short_width if config else 1080,
+            height=config.short_height if config else 1920,
+            fps=config.fps if config else 30,
             min_duration=5.0,
         ),
     )

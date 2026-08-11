@@ -18,11 +18,16 @@ import pytest
 from api.core.errors import MediaProcessingError
 from api.domain.audio import AudioAnalysis, VisualizerData
 from api.media import (
+    SHORT_BRANDING_POSITION,
+    SHORT_RADIO_POSITION,
+    SHORT_RADIO_SCALE,
     VisualizerEngine,
     VisualizerLayer,
     VisualizerLayout,
     branding_pixels,
     radio_overlay_pixels,
+    slice_visualizer,
+    vertical_layout,
     visualizer_region_pixels,
 )
 from api.media.visualizer import (
@@ -169,11 +174,17 @@ async def test_render_composes_layer_from_visualizer_data(tmp_path):
     # radio_scale defaults to 34% of the master frame (TDD-001 §52)
     assert layer.layout.radio_scale == pytest.approx(RADIO_SCALE)
     assert layer.layout.radio_position == pytest.approx(RADIO_POSITION)
-    # inner ~70% of the radio square -> 0.34 * 0.5 * 0.7 = 0.119 half-extent
-    half = RADIO_SCALE * 0.5 * 0.7
-    expected = tuple(
-        round(center + offset, 4)
-        for center, offset in zip(RADIO_POSITION * 2, (-half, -half, half, half))
+    # inner ~70% of the radio square -> 0.34 * 0.5 * 0.7 = 0.119 half-extent in
+    # x; the y half-extent is the same pixel span re-scaled to the frame height
+    # so the region stays inside the radio square on any aspect ratio
+    # (TDD-001 §52, §128).
+    half_x = RADIO_SCALE * 0.5 * 0.7
+    half_y = half_x * 1920 / 1080
+    expected = (
+        round(RADIO_POSITION[0] - half_x, 4),
+        round(RADIO_POSITION[1] - half_y, 4),
+        round(RADIO_POSITION[0] + half_x, 4),
+        round(RADIO_POSITION[1] + half_y, 4),
     )
     assert layer.layout.visualizer_region == expected
     assert layer.layout.branding_position == BRANDING_POSITION
@@ -307,3 +318,91 @@ def test_render_frames_bar_height_tracks_value():
 def test_render_frames_rejects_nonpositive_dimensions():
     with pytest.raises(ValueError):
         _engine().render_frames(_sprite_data(), width=0, height=60)
+
+
+# --- Phase 16: vertical composition (MAD-001 §27; TDD-001 §127-128) -----------
+
+
+def test_vertical_layout_places_radio_in_upper_third():
+    """MAD-001 §27: the short's radio sits centered in the upper third, branding
+    anchors bottom-center, and the style carries through."""
+    layout = vertical_layout(style="waveform", width=1080, height=1920)
+    assert layout.radio_position == SHORT_RADIO_POSITION  # (0.5, 0.35)
+    assert layout.radio_scale == SHORT_RADIO_SCALE  # 0.5
+    assert layout.branding_position == SHORT_BRANDING_POSITION  # (0.5, 0.9)
+    assert layout.visualizer_style == "waveform"
+    # the radio is a 0.5×1080 square centered at y=0.35 → entirely in the upper
+    # half of the frame and horizontally centered.
+    x, y, w, h = radio_overlay_pixels(layout, width=1080, height=1920)
+    assert (w, h) == (540, 540)
+    assert x + w // 2 == 540
+    assert 0.2 * 1920 <= y and y + h <= 0.5 * 1920
+
+
+def test_vertical_layout_region_stays_inside_radio_for_short_sizes():
+    """TDD-001 §128: the visualizer region never leaves the radio square on any
+    short resolution, so important elements are never cropped."""
+    for width, height in [(1080, 1920), (720, 1280), (1080, 1080), (405, 720)]:
+        layout = vertical_layout(width=width, height=height)
+        rx, ry, rw, rh = radio_overlay_pixels(layout, width=width, height=height)
+        vx, vy, vw, vh = visualizer_region_pixels(layout, width=width, height=height)
+        assert rx <= vx and vx + vw <= rx + rw
+        assert ry <= vy and vy + vh <= ry + rh
+
+
+def test_vertical_layout_region_is_square_in_pixel_space():
+    """The region is the radio's inner 70% in pixel space, so it stays square on
+    9:16 frames (the Phase 14 aspect-aware fix applied to the vertical layout)."""
+    layout = vertical_layout(width=1080, height=1920)
+    vx, vy, vw, vh = visualizer_region_pixels(layout, width=1080, height=1920)
+    assert vw == vh
+    assert (vw, vh) == (378, 378)
+
+
+def test_slice_visualizer_subwindows_segment():
+    """TDD-001 §129: slicing keeps the segment's frames and rebases timestamps to
+    short t=0 so the bars stay synchronized with the trimmed audio."""
+    fps = 30
+    n = 90
+    data = VisualizerData(
+        style="bars",
+        position="radio-center",
+        fps=fps,
+        band_names=BAND_NAMES,
+        frames=[[float(i) % 2 / 2] * 5 for i in range(n)],
+        timestamps=[round(i / fps, 3) for i in range(n)],
+    )
+    sliced = slice_visualizer(data, start_seconds=1.0, duration_seconds=1.0)
+    assert len(sliced.frames) == fps  # the [1.0s, 2.0s) window at 30fps
+    assert sliced.frames[0] == data.frames[30]
+    assert sliced.frames[-1] == data.frames[59]
+    assert sliced.timestamps[0] == 0.0  # rebased to the short's t=0
+    assert sliced.timestamps[-1] == pytest.approx(1.0, abs=0.05)
+    assert sliced.fps == fps
+    assert sliced.band_names == BAND_NAMES
+
+
+def test_slice_visualizer_bounds_clamp_to_track_end():
+    """A window past the end clamps to the available frames, never past it."""
+    fps = 30
+    data = VisualizerData(
+        style="bars",
+        position="radio-center",
+        fps=fps,
+        band_names=BAND_NAMES,
+        frames=[[0.5] * 5 for _ in range(90)],
+        timestamps=[round(i / fps, 3) for i in range(90)],
+    )
+    sliced = slice_visualizer(data, start_seconds=2.5, duration_seconds=5.0)
+    assert len(sliced.frames) <= len(data.frames) - 75
+    assert sliced.frames == data.frames[75:]
+    assert sliced.timestamps[0] == pytest.approx(0.0)
+
+
+def test_slice_visualizer_noop_for_empty_or_short_window():
+    data = VisualizerData(
+        style="bars", position="radio-center", fps=30, band_names=BAND_NAMES,
+        frames=[[0.5] * 5 for _ in range(10)], timestamps=[i / 30 for i in range(10)],
+    )
+    assert slice_visualizer(data, start_seconds=0.0, duration_seconds=0.0) is data
+    assert slice_visualizer(data, start_seconds=1.0, duration_seconds=0.0) is data

@@ -35,6 +35,7 @@ from api.media import (
     probe_to_model,
     radio_overlay_pixels,
     run_validation_checks,
+    short_render_profile,
     visualizer_region_pixels,
 )
 from api.media.ffmpeg import _escape_filter, _run_process
@@ -184,6 +185,46 @@ def test_filter_graph_branding_opacity_adds_alpha(tmp_path):
     assert "fontcolor=white:alpha=0.65" in graph
 
 
+def test_filter_graph_branding_align_center_anchors_on_midpoint(tmp_path):
+    """TDD-001 §128: center branding drops the pixel x for ``(w-text_w)/2`` so the
+    text hugs the frame midpoint regardless of length."""
+    request = _request(
+        tmp_path,
+        branding_text="MY",
+        branding_font=tmp_path / "font.ttf",
+        branding_align="center",
+        branding_y=1728,
+    )
+    graph = build_render_args(request, TEST_PROFILE)[
+        build_render_args(request, TEST_PROFILE).index("-filter_complex") + 1
+    ]
+    assert "x=(w-text_w)/2" in graph
+    assert "y=1728" in graph
+    assert "fontcolor=white" in graph
+
+
+def test_render_args_short_trims_audio_and_centers_branding(tmp_path):
+    """Phase 16: a 9:16 short trims only the audio input to the segment, keeps
+    the visualizer input, and renders the frame at the short profile size."""
+    request = _request(
+        tmp_path,
+        overlays=[OverlaySpec(path=tmp_path / "r.png")],
+        visualizer=_viz_input(tmp_path),
+        branding_text="MY",
+        branding_font=tmp_path / "font.ttf",
+        branding_align="center",
+        segment=ShortSegment(start_seconds=10.0, duration_seconds=15.0),
+    )
+    args = build_render_args(request, SHORT_PROFILE)
+    audio_pos = args.index(str(tmp_path / "a.wav"))
+    assert args[audio_pos - 5 : audio_pos - 3] == ["-ss", "10"]
+    assert args[audio_pos - 3 : audio_pos - 1] == ["-t", "15"]
+    graph = args[args.index("-filter_complex") + 1]
+    assert "x=(w-text_w)/2" in graph
+    assert f"scale={SHORT_PROFILE.width}:{SHORT_PROFILE.height}" in graph
+    assert "drawtext=" in graph
+
+
 # --- Visualizer compositing (TDD-001 §52) -------------------------------------
 
 def _viz_input(tmp_path, **kwargs) -> VisualizerInput:
@@ -270,6 +311,27 @@ def test_master_render_profile_honors_production_dimensions():
 
 def test_master_render_profile_defaults_without_config():
     assert master_render_profile(None) is MASTER_PROFILE
+
+
+def test_short_render_profile_honors_production_dimensions():
+    config = ProductionConfig(
+        mode=ProductionMode.GENRE,
+        genre="lofi",
+        short_width=720,
+        short_height=1280,
+        fps=24,
+    )
+    profile = short_render_profile(config)
+    assert (profile.width, profile.height) == (720, 1280)
+    assert profile.fps == 24
+    # encoding defaults stay externalized through the base profile
+    assert profile.video_codec == SHORT_PROFILE.video_codec
+    assert profile.audio_codec == SHORT_PROFILE.audio_codec
+    assert profile.crf == SHORT_PROFILE.crf
+
+
+def test_short_render_profile_defaults_without_config():
+    assert short_render_profile(None) is SHORT_PROFILE
 
 
 # --- Probe parsing (ffprobe JSON) --------------------------------------------

@@ -45,6 +45,79 @@ RADIO_SCALE = 0.34
 RADIO_POSITION = (0.5, 0.5)
 BRANDING_POSITION = (0.03, 0.03)
 
+#: Short (9:16) vertical composition (MAD-001 §27; TDD-001 §56, §127-128).
+SHORT_RADIO_POSITION = (0.5, 0.35)
+SHORT_RADIO_SCALE = 0.5
+SHORT_BRANDING_POSITION = (0.5, 0.9)
+
+#: Fraction of the radio square used for the visualizer region (TDD-001 §52).
+VISUALIZER_REGION_FRACTION = 0.7
+
+
+def _region_from_radio(
+    radio_position: tuple[float, float],
+    radio_scale: float,
+    *,
+    width: int,
+    height: int,
+    inner: float = VISUALIZER_REGION_FRACTION,
+) -> tuple[float, float, float, float]:
+    """Normalized region = the radio square's inner ``inner`` portion.
+
+    The radio is a square of ``radio_scale`` × frame *width*; its inner 70% is
+    computed in pixels and re-normalized per axis so the region always stays
+    inside the radio on any aspect ratio (TDD-001 §52, §128 safe margins).
+    """
+    half_x = radio_scale * 0.5 * inner  # fraction of the frame width
+    half_y = half_x * width / height  # same pixels, re-scaled to the height
+    cx, cy = radio_position
+    return (
+        round(cx - half_x, 4),
+        round(cy - half_y, 4),
+        round(cx + half_x, 4),
+        round(cy + half_y, 4),
+    )
+
+
+def vertical_layout(style: str = "bars", *, width: int = 1080, height: int = 1920) -> VisualizerLayout:
+    """Dedicated 9:16 composition (MAD-001 §27; TDD-001 §56, §127-128).
+
+    The radio/wave sits centered in the upper third, branding anchors
+    bottom-center, and the visualizer region stays inside the radio square for
+    any short size (TDD-001 §128 — important elements never cropped).
+    """
+    return VisualizerLayout(
+        radio_position=(round(SHORT_RADIO_POSITION[0], 4), round(SHORT_RADIO_POSITION[1], 4)),
+        radio_scale=SHORT_RADIO_SCALE,
+        visualizer_region=_region_from_radio(
+            SHORT_RADIO_POSITION, SHORT_RADIO_SCALE, width=width, height=height
+        ),
+        visualizer_style=style,
+        branding_position=(round(SHORT_BRANDING_POSITION[0], 4), round(SHORT_BRANDING_POSITION[1], 4)),
+    )
+
+
+def slice_visualizer(
+    data: VisualizerData,
+    *,
+    start_seconds: float,
+    duration_seconds: float,
+) -> VisualizerData:
+    """The visualizer window matching an audio segment ``[start, start+duration)``.
+
+    Shares the master's deterministic band data (TDD-001 §127) but keeps only
+    the frames the segment covers, with timestamps rebased to the short's t=0 so
+    the bars stay synchronized with the trimmed audio (PRD-001 §24; TDD-001 §129
+    — never regenerates independent music).
+    """
+    if not data.frames or duration_seconds <= 0:
+        return data
+    start_idx = max(int(round(start_seconds * data.fps)), 0)
+    end_idx = max(int(round((start_seconds + duration_seconds) * data.fps)), start_idx + 1)
+    frames = data.frames[start_idx:end_idx]
+    timestamps = [round(t - start_seconds, 3) for t in data.timestamps[start_idx:end_idx]]
+    return data.model_copy(update={"frames": frames, "timestamps": timestamps})
+
 
 def radio_overlay_pixels(layout: "VisualizerLayout", *, width: int, height: int) -> tuple[int, int, int, int]:
     """Normalized layout → (x, y, w, h) pixels for the radio asset overlay.
@@ -164,23 +237,21 @@ class VisualizerEngine:
         radio_scale: float = RADIO_SCALE,
         radio_position: tuple[float, float] = RADIO_POSITION,
         branding_position: tuple[float, float] = BRANDING_POSITION,
+        frame_width: int = 1920,
+        frame_height: int = 1080,
     ) -> VisualizerLayer:
-        """Compose the visualizer layer layout for the master frame.
+        """Compose the visualizer layer layout for a ``frame_width``×``frame_height`` frame.
 
-        The visualizer region is the inner ~70% of the radio square, so the bars
-        render inside the radio's central display area (TDD-001 §52).
+        The visualizer region is the inner ~70% of the radio square computed in
+        pixel space, so the bars always render inside the radio's central
+        display area regardless of the frame's aspect ratio (TDD-001 §52, §128).
         """
-        half = radio_scale * 0.5 * 0.7
-        region = (
-            round(radio_position[0] - half, 4),
-            round(radio_position[1] - half, 4),
-            round(radio_position[0] + half, 4),
-            round(radio_position[1] + half, 4),
-        )
         layout = VisualizerLayout(
             radio_position=(round(radio_position[0], 4), round(radio_position[1], 4)),
             radio_scale=radio_scale,
-            visualizer_region=region,
+            visualizer_region=_region_from_radio(
+                radio_position, radio_scale, width=frame_width, height=frame_height
+            ),
             visualizer_style=visualizer_data.style,
             branding_position=(round(branding_position[0], 4), round(branding_position[1], 4)),
         )

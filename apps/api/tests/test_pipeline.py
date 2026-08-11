@@ -398,10 +398,12 @@ async def test_render_master_composites_visualizer_from_layout(services, session
     radio = request.overlays[0]
     assert (radio.x, radio.y, radio.width, radio.height) == (634, 214, 653, 653)
 
-    # visualizer sprites rendered inside the radio's display region
+    # visualizer sprites rendered inside the radio's display region — the
+    # region is the radio square's inner 70% computed in pixel space, so it is
+    # square on any frame aspect ratio (TDD-001 §52, §128)
     assert request.visualizer is not None
     assert request.visualizer.region_width == 456
-    assert request.visualizer.region_height == 258
+    assert request.visualizer.region_height == 458
     sprites = sorted(request.visualizer.frames_dir.glob("*.png"))
     visualizer = VisualizerData.model_validate_json(
         services.artifact_service.read_text(prod.id, ArtifactKind.VISUALIZER_DATA)
@@ -439,6 +441,101 @@ async def test_render_short_writes_video(services, session_factory):
     prod = _make_production(session_factory)
     await run_pipeline(prod.id, stop_after="render_short")
     assert services.artifact_service.exists(prod.id, ArtifactKind.SHORT_VIDEO)
+
+
+async def test_render_short_composites_vertical_layout(services, session_factory):
+    """MAD-001 §27 / TDD-001 §128: the short uses the dedicated 9:16 layout —
+    radio in the upper third, visualizer sliced to the segment window, branding
+    bottom-center — and never regenerates independent music."""
+    prod = _make_production(session_factory)
+    await run_pipeline(prod.id, stop_after="render_short")
+
+    request = services.media_engine.requests[-1]
+    # radio = 0.5 × 1080 square centered at (0.5, 0.35) on 1080x1920
+    radio = request.overlays[0]
+    assert (radio.x, radio.y, radio.width, radio.height) == (270, 402, 540, 540)
+
+    # visualizer sliced into the radio's display region (square in pixel space)
+    assert request.visualizer is not None
+    assert (request.visualizer.region_x, request.visualizer.region_y) == (351, 483)
+    assert (request.visualizer.region_width, request.visualizer.region_height) == (378, 378)
+    assert request.visualizer.duration_seconds == pytest.approx(2.0)
+
+    # branding anchors bottom-center and is horizontally centered
+    assert request.branding_align == "center"
+    assert (request.branding_x, request.branding_y) == (540, 1728)
+
+    # the master audio is trimmed to the selected segment (TDD-001 §129)
+    segment = ShortSegment.model_validate_json(
+        services.artifact_service.read_text(prod.id, ArtifactKind.SHORT_SEGMENT)
+    )
+    assert request.segment == segment
+    assert segment.start_seconds >= 0 and segment.duration_seconds > 0
+
+    # the profile honors the production's configured short size/FPS
+    profile = services.media_engine.profiles[-1]
+    assert (profile.width, profile.height) == (1080, 1920)
+    assert profile.fps == 30
+
+
+async def test_render_short_slices_visualizer_to_segment(services, session_factory):
+    """PRD-001 §24 / TDD-001 §129: the short reuses the master's visualizer data
+    (never regenerates music) and renders one sprite per sliced frame."""
+    prod = _make_production(session_factory)
+    await run_pipeline(prod.id, stop_after="render_short")
+
+    request = services.media_engine.requests[-1]
+    master_data = VisualizerData.model_validate_json(
+        services.artifact_service.read_text(prod.id, ArtifactKind.VISUALIZER_DATA)
+    )
+    sprites = sorted(request.visualizer.frames_dir.glob("*.png"))
+    assert sprites, "short visualizer sprites must be rendered"
+    assert sprites[0].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    # the sliced window covers the segment — at most as many frames as the master
+    segment = ShortSegment.model_validate_json(
+        services.artifact_service.read_text(prod.id, ArtifactKind.SHORT_SEGMENT)
+    )
+    assert len(sprites) <= len(master_data.frames)
+    assert sprites[0].parent.name == "short-visualizer"
+
+
+async def test_select_short_segment_validates_window(services, session_factory):
+    """MAD-001 §26: the final segment must be validated before rendering — a
+    window past the master end or beyond the platform ceiling is rejected."""
+    from api.activities.pipeline import _validate_short_segment
+
+    prod = _make_production(session_factory)
+    await run_pipeline(prod.id, stop_after="analyze_audio")
+    config = services.get_production_config(prod.id)
+
+    # a valid clip within the 2.0s master passes
+    await _validate_short_segment(
+        services,
+        prod.id,
+        ShortSegment(start_seconds=0.0, duration_seconds=2.0, reason="fit"),
+        config,
+    )
+    # a window past the end of the master is rejected
+    with pytest.raises(QualityCheckError):
+        await _validate_short_segment(
+            services,
+            prod.id,
+            ShortSegment(start_seconds=1.0, duration_seconds=45.0, reason="past end"),
+            config,
+        )
+    # a structurally invalid clip (negative start) is rejected — Pydantic blocks
+    # this at construction, so we bypass validation via model_construct
+    bad_segment = ShortSegment.model_construct(start_seconds=-1.0, duration_seconds=10.0, reason="neg")
+    with pytest.raises(QualityCheckError):
+        await _validate_short_segment(services, prod.id, bad_segment, config)
+    # a clip above the 60s platform ceiling is rejected
+    with pytest.raises(QualityCheckError):
+        await _validate_short_segment(
+            services,
+            prod.id,
+            ShortSegment(start_seconds=0.0, duration_seconds=90.0, reason="too long"),
+            config,
+        )
 
 
 async def test_validate_short(services, session_factory):

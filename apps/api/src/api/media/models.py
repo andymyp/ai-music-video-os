@@ -113,8 +113,16 @@ class RenderRequest(BaseModel):
     branding_y: int = 0
     branding_size: int = Field(default=48, gt=0)
     branding_opacity: float | None = Field(default=None, ge=0.0, le=1.0)
+    branding_align: str = "left"
     output_path: Path
     segment: ShortSegment | None = None
+
+    @field_validator("branding_align")
+    @classmethod
+    def _align(cls, value: str) -> str:
+        if value not in ("left", "center"):
+            raise ValueError("branding_align must be 'left' or 'center'")
+        return value
 
 
 def master_render_profile(
@@ -134,6 +142,27 @@ def master_render_profile(
             "name": base.name,
             "width": config.master_width,
             "height": config.master_height,
+            "fps": config.fps,
+        }
+    )
+
+
+def short_render_profile(
+    config: ProductionConfig | None,
+    base: RenderProfile = SHORT_PROFILE,
+) -> RenderProfile:
+    """Render profile honoring a production's configured short size/FPS.
+
+    Mirrors :func:`master_render_profile` for the vertical output
+    (TDD-001 §127 ``ShortRenderProfile``).
+    """
+    if config is None:
+        return base
+    return base.model_copy(
+        update={
+            "name": base.name,
+            "width": config.short_width,
+            "height": config.short_height,
             "fps": config.fps,
         }
     )
