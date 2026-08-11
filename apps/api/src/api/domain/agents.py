@@ -115,13 +115,25 @@ class ShortSelectionRequest(BaseModel):
 # --- Metadata -----------------------------------------------------------------
 
 class MetadataRequest(BaseModel):
-    """Input for the Metadata Agent (PRD-001 §68)."""
+    """Input for the Metadata Agent (PRD-001 §68; TDD-001 §57).
+
+    Carries the full creative brief — CreativeConcept, MusicStrategy,
+    VisualStrategy, Production Context, Trend Context and the selected
+    ShortSegment — so metadata is generated from the actual production rather
+    than the genre alone (MASTER §27: "metadata must be generated from actual
+    production information"; TDD-001 §58 correspondence to the production).
+    """
 
     genre: str
     mood: str
     theme: str = ""
+    audience: str = ""
+    music_concept: str = ""
+    visual_concept: str = ""
+    trend_context: str = ""
     branding: str | None = Field(default=None, max_length=60)
     title_hint: str | None = Field(default=None, max_length=120)
+    short_segment: ShortSegment | None = None
 
     @field_validator("genre", "mood")
     @classmethod

@@ -1917,7 +1917,7 @@ Maintain the following table in the project:
 | 14    | Visualizer Pipeline     | COMPLETED   |
 | 15    | Master Rendering        | COMPLETED   |
 | 16    | Short Generation        | COMPLETED   |
-| 17    | Metadata                | NOT_STARTED |
+| 17    | Metadata                | COMPLETED   |
 | 18    | Quality Control         | NOT_STARTED |
 | 19    | API                     | NOT_STARTED |
 | 20    | Frontend                | NOT_STARTED |

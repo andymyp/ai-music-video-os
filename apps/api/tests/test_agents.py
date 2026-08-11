@@ -371,7 +371,7 @@ async def test_short_selection_integration_with_real_analysis(tmp_path, runtime)
     assert abs(segment.duration_seconds - 10.0) <= 1.0
 
 
-# --- Metadata Agent (PRD-001 §68) --------------------------------------------
+# --- Metadata Agent (PRD-001 §68, TDD-001 §57-58) -----------------------------
 
 async def test_metadata_produces_valid_package(runtime):
     from api.domain import MetadataRequest
@@ -381,7 +381,8 @@ async def test_metadata_produces_valid_package(runtime):
     ))
     assert package.master.title and package.master.description
     assert package.short.title and package.short.description
-    assert package.master.hashtags == package.short.hashtags == ["#lofi", "#calm"]
+    # hashtags derive deterministically from genre/mood/theme (PRD-001 §68.6)
+    assert package.master.hashtags == package.short.hashtags == ["#lofi", "#calm", "#nightdrive"]
 
 
 async def test_metadata_hashtags_never_empty(runtime):
@@ -389,6 +390,72 @@ async def test_metadata_hashtags_never_empty(runtime):
 
     package = await runtime.run("metadata", MetadataRequest(genre="lo-fi beats!!", mood=".."))
     assert package.master.hashtags  # sanitized, never an empty list
+
+
+async def test_metadata_skips_oversized_theme_hashtag(runtime):
+    """A theme too long for the domain's 30-char hashtag limit is dropped, not
+    emitted as a structurally invalid tag (TDD-001 §58 metadata validation)."""
+    from api.domain import MetadataRequest
+
+    package = await runtime.run("metadata", MetadataRequest(
+        genre="lofi", mood="calm", theme="an extremely long descriptive theme phrase",
+    ))
+    assert "#anextremelylongdescriptivethemephrase" not in package.master.hashtags
+    assert all(len(tag) <= 30 for tag in package.master.hashtags)
+    assert package.master.hashtags == ["#lofi", "#calm"]
+
+
+async def test_metadata_prompt_uses_full_creative_brief():
+    """TDD-001 §57: the prompt carries the CreativeConcept, MusicStrategy,
+    VisualStrategy, Production Context, Trend Context and ShortSegment — not
+    just the genre."""
+    from api.agents.metadata import MetadataAgent
+    from api.capabilities import StructuredGenerationRequest, StructuredResult
+    from api.domain import MetadataRequest, ShortSegment
+
+    recorded: list[str] = []
+
+    class RecordingLLMTool(Tool):
+        name = "llm_generate"
+        description = "recording llm"
+        input_schema = StructuredGenerationRequest
+        output_schema = StructuredResult
+
+        async def run(self, input):
+            recorded.append(input.prompt)
+            return StructuredResult(data={"title": "T", "description": "D"}, model="spy")
+
+    tools = ToolRegistry()
+    tools.register(RecordingLLMTool())
+    agent = MetadataAgent(tools)
+    package = await agent.execute(MetadataRequest(
+        genre="lofi",
+        mood="calm",
+        theme="night drive",
+        audience="late-night study listeners",
+        music_concept="70-85 bpm lofi keys and soft drums",
+        visual_concept="neon city rain, moody low light",
+        trend_context="chill beats (genre lofi)",
+        branding="MY CHANNEL",
+        short_segment=ShortSegment(start_seconds=10.0, duration_seconds=15.0),
+    ))
+    assert package.master.title == "T" and package.short.title == "T"
+    master_prompt, short_prompt = recorded
+    for fragment in (
+        "night drive",
+        "late-night study listeners",
+        "70-85 bpm lofi keys",
+        "neon city rain",
+        "chill beats (genre lofi)",
+        "MY CHANNEL",
+    ):
+        assert fragment in master_prompt
+        assert fragment in short_prompt
+    # master is optimized for long-form; short for vertical discovery
+    assert "long-form" in master_prompt
+    assert "vertical" in short_prompt
+    # the short prompt references the actual selected segment (TDD-001 §57)
+    assert "starting at 10s" in short_prompt
 
 
 # --- Quality Control Agent (PRD-001 §69) -------------------------------------

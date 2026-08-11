@@ -853,16 +853,49 @@ async def validate_short(production_id: str) -> PipelineStageResult:
 
 @activity.defn
 async def generate_metadata(production_id: str) -> PipelineStageResult:
-    """Generate platform metadata for master and short and persist it."""
+    """Generate platform metadata for master and short and persist it.
+
+    The request is built from the actual production information (TDD-001 §57):
+    the CreativeConcept (theme, audience, music/visual direction), the
+    MusicStrategy (BPM, instruments), the VisualStrategy (environment, lighting,
+    style, palette), trend context in trending mode, and the selected
+    ShortSegment — so the generated package corresponds to the production
+    (TDD-001 §58) rather than the genre alone (MASTER §27).
+    """
     services = get_activity_services()
     production = await asyncio.to_thread(services.get_production, production_id)
     genre, mood = await _genre_mood(services, production_id)
+    concept = await asyncio.to_thread(services.get_concept, production_id)
+    music = await asyncio.to_thread(services.get_music_strategy, production_id)
+    visual = await asyncio.to_thread(services.get_visual_strategy, production_id)
+    trend = await asyncio.to_thread(services.get_trend_result, production_id)
+
+    music_concept = _music_concept_summary(concept, music)
+    visual_concept = _visual_concept_summary(concept, visual)
+    trend_context = ""
+    if trend is not None and trend.topic:
+        trend_context = f"{trend.topic} (genre {trend.genre or 'n/a'})"
+
+    segment = None
+    if services.artifact_service.exists(production_id, ArtifactKind.SHORT_SEGMENT):
+        segment = ShortSegment.model_validate_json(
+            await asyncio.to_thread(
+                services.artifact_service.read_text, production_id, ArtifactKind.SHORT_SEGMENT
+            )
+        )
+
     package = await services.agent_runtime.run(
         "metadata",
         MetadataRequest(
             genre=genre,
             mood=mood,
+            theme=concept.theme if concept else "",
+            audience=concept.audience if concept and concept.audience else "",
+            music_concept=music_concept,
+            visual_concept=visual_concept,
+            trend_context=trend_context,
             branding=production.branding_text,
+            short_segment=segment,
         ),
     )
     await asyncio.to_thread(
@@ -872,6 +905,42 @@ async def generate_metadata(production_id: str) -> PipelineStageResult:
         package.model_dump_json(indent=2),
     )
     return _result("generate_metadata", package.master.title)
+
+
+def _music_concept_summary(concept, music) -> str:
+    """Flatten MusicStrategy into a prompt-ready concept summary (TDD-001 §57)."""
+    parts: list[str] = []
+    if concept is not None and concept.music_direction:
+        parts.append(concept.music_direction)
+    if music is not None:
+        if music.bpm_range:
+            parts.append(f"{music.bpm_range[0]}-{music.bpm_range[1]} bpm")
+        if music.key:
+            parts.append(f"key {music.key}")
+        if music.instruments:
+            parts.append("instruments: " + ", ".join(music.instruments))
+        if music.structure:
+            parts.append(music.structure)
+    return " ".join(parts)
+
+
+def _visual_concept_summary(concept, visual) -> str:
+    """Flatten VisualStrategy into a prompt-ready concept summary (TDD-001 §57)."""
+    parts: list[str] = []
+    if concept is not None and concept.visual_direction:
+        parts.append(concept.visual_direction)
+    if visual is not None:
+        if visual.environment:
+            parts.append(visual.environment)
+        if visual.lighting:
+            parts.append(visual.lighting)
+        if visual.style:
+            parts.append(visual.style)
+        if visual.era:
+            parts.append(visual.era)
+        if visual.palette:
+            parts.append("palette: " + ", ".join(visual.palette))
+    return " ".join(parts)
 
 
 @activity.defn

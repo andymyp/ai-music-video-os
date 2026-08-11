@@ -9,6 +9,7 @@ tests; a server-backed workflow run is gated behind the embedded test server.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -555,6 +556,44 @@ async def test_generate_metadata_writes_package(services, session_factory):
     )
     assert package.master.title
     assert package.short.title
+
+
+async def test_generate_metadata_uses_actual_production_info(services, session_factory, monkeypatch):
+    """MASTER §27 / TDD-001 §57: the metadata request is built from the
+    persisted creative brief, MusicStrategy, VisualStrategy, trend context and
+    the ShortSegment — not the genre alone."""
+    prod = _make_production(session_factory)
+    await run_pipeline(prod.id, stop_after="render_short")
+
+    captured: dict[str, object] = {}
+    original_run = services.agent_runtime.run
+
+    async def spy_run(name, request):
+        captured["request"] = request
+        return await original_run(name, request)
+
+    monkeypatch.setattr(services.agent_runtime, "run", spy_run)
+    await ActivityEnvironment().run(generate_metadata, prod.id)
+
+    request = captured["request"]
+    assert request.genre == "lofi"
+    assert request.theme, "theme must come from the CreativeConcept"
+    assert request.audience, "audience must come from the CreativeConcept"
+    assert request.music_concept and "bpm" in request.music_concept
+    assert request.visual_concept
+    assert request.short_segment is not None and request.short_segment.duration_seconds > 0
+
+    # the persisted package corresponds to the production (TDD-001 §58) and the
+    # theme-derived hashtag lands in the metadata (genre/mood/theme determinism)
+    package = MetadataPackage.model_validate_json(
+        services.artifact_service.read_text(prod.id, ArtifactKind.METADATA)
+    )
+    assert package.master.title and package.master.description
+    assert package.short.title and package.short.description
+    assert "#lofi" in package.master.hashtags
+    # hashtags correspond to the actual production (mood "lofi atmosphere")
+    mood_slug = re.sub(r"[^a-z0-9]+", "", request.mood.lower())
+    assert f"#{mood_slug}" in package.master.hashtags
 
 
 async def test_run_qc_passes_with_complete_artifacts(services, session_factory):
