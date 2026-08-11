@@ -1920,7 +1920,7 @@ Maintain the following table in the project:
 | 17    | Metadata                | COMPLETED   |
 | 18    | Quality Control         | COMPLETED   |
 | 19    | API                     | COMPLETED   |
-| 20    | Frontend                | NOT_STARTED |
+| 20    | Frontend                | COMPLETED   |
 | 21    | Recovery / Cancellation | NOT_STARTED |
 | 22    | Observability           | NOT_STARTED |
 | 23    | Security                | NOT_STARTED |
