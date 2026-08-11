@@ -1,7 +1,9 @@
 """FastAPI application entry point.
 
-Phase 00 provides the health surface and bootstraps the runtime directories
-and database connection. Production/asset/config routes arrive in Phase 19 (API).
+Phase 00 provides the health surface and bootstraps the runtime directories,
+database connection and the production API (Phase 19). The app never executes
+production work itself: it validates/persists and hands execution to Temporal
+through the injected :class:`~api.routes.runner.ProductionRunner` (MAD-001 §45).
 """
 
 from __future__ import annotations
@@ -13,12 +15,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.config.settings import AppSettings, get_settings
 from api.core.logging import configure_logging
+from api.database import Base, create_session_factory
 from api.database.engine import connect_database, verify_database
+from api.routes import productions_router
+from api.routes.runner import ProductionRunner, TemporalProductionRunner
+from api.storage.artifacts import ArtifactService
 from api.storage.layout import ensure_runtime_dirs
+from api.storage.storage import StorageService
 
 
-def create_app(settings: AppSettings | None = None) -> FastAPI:
-    """Application factory. ``settings`` is injectable for tests."""
+def create_app(
+    settings: AppSettings | None = None,
+    *,
+    production_runner: ProductionRunner | None = None,
+) -> FastAPI:
+    """Application factory. ``settings`` and ``production_runner`` are injectable
+    for tests (a recording fake replaces the Temporal-backed runner)."""
     settings = settings or get_settings()
     configure_logging(settings)
 
@@ -26,6 +38,16 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> None:
         ensure_runtime_dirs(settings)
         app.state.db_engine = connect_database(settings)
+        # Dev bootstrap: create tables on startup. Alembic migrations supersede
+        # this for deployment; for the local-first backend it keeps the app
+        # runnable without an extra migrate step (MASTER §29).
+        Base.metadata.create_all(app.state.db_engine)
+        app.state.session_factory = create_session_factory(settings, app.state.db_engine)
+        app.state.artifact_service = ArtifactService(
+            StorageService(settings.app_data_dir),
+            settings.app_data_dir / "productions",
+        )
+        app.state.production_runner = production_runner or TemporalProductionRunner(settings)
         yield
         app.state.db_engine.dispose()
 
@@ -74,6 +96,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         except Exception:  # noqa: BLE001 - health endpoint must not raise
             db_ok = False
         return {"status": "ok" if db_ok else "error", "database": db_ok}
+
+    app.include_router(productions_router)
 
     return app
 
