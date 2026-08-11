@@ -899,3 +899,37 @@ async def test_full_pipeline_reaches_completed_with_deliverables(services, sessi
     with session_scope(session_factory) as session:
         reloaded = make_production_repository(session).get(prod.id)
     assert reloaded.status is ProductionStatus.COMPLETED
+
+
+async def test_full_pipeline_trending_mode_reaches_completed_with_deliverables(services, session_factory):
+    """Trending mode E2E: mock trend provider supplies signals, agent selects
+    a genre, and the rest of the pipeline runs identically (MASTER §38-39)."""
+    prod = _make_production(session_factory, mode=ProductionMode.TRENDING, genre=None)
+    results = await run_pipeline(prod.id)
+
+    assert set(results) == {fn.__name__ for fn in PIPELINE_STAGE_FNS}
+    for kind in (
+        ArtifactKind.AUDIO_SOURCE,
+        ArtifactKind.AUDIO_MASTER,
+        ArtifactKind.AUDIO_MASTER_REPORT,
+        ArtifactKind.AUDIO_ANALYSIS,
+        ArtifactKind.BACKGROUND,
+        ArtifactKind.BACKGROUND_PROMPT,
+        ArtifactKind.RADIO,
+        ArtifactKind.VISUALIZER_DATA,
+        ArtifactKind.VISUALIZER_LAYER,
+        ArtifactKind.MASTER_VIDEO,
+        ArtifactKind.SHORT_VIDEO,
+        ArtifactKind.SHORT_SEGMENT,
+        ArtifactKind.METADATA,
+        ArtifactKind.QC_REPORT,
+        ArtifactKind.MANIFEST,
+        ArtifactKind.PRODUCTION,
+    ):
+        assert services.artifact_service.exists(prod.id, kind), kind
+
+    with session_scope(session_factory) as session:
+        reloaded = make_production_repository(session).get(prod.id)
+    assert reloaded.status is ProductionStatus.COMPLETED
+    # Trending mode must have selected a concrete genre
+    assert reloaded.genre is not None and reloaded.genre != ""

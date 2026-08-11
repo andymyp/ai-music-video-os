@@ -1922,9 +1922,9 @@ Maintain the following table in the project:
 | 19    | API                     | COMPLETED   |
 | 20    | Frontend                | COMPLETED   |
 | 21    | Recovery / Cancellation | COMPLETED   |
-| 22    | Observability           | COMPLETED    |
+| 22    | Observability           | COMPLETED   |
 | 23    | Security                | COMPLETED   |
-| 24    | End-to-End Integration  | NOT_STARTED |
+| 24    | End-to-End Integration  | COMPLETED   |
 | 25    | Performance Validation  | NOT_STARTED |
 | 26    | Final Acceptance        | NOT_STARTED |
 

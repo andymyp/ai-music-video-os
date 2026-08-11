@@ -173,6 +173,16 @@ class WorkflowServices:
             repo.update(production)
         return target
 
+    def update_production_genre(self, production_id: str, genre: str) -> None:
+        """Update the production's genre (used by trending mode after trend research)."""
+        with session_scope(self._session_factory) as session:
+            repo = make_production_repository(session)
+            production = repo.get(production_id)
+            if production is None:
+                raise WorkflowError(f"production {production_id!r} not found")
+            production.genre = genre
+            repo.update(production)
+
     def save_music_strategy(self, production_id: str, strategy) -> None:
         with session_scope(self._session_factory) as session:
             make_production_repository(session).save_music_strategy(production_id, strategy)

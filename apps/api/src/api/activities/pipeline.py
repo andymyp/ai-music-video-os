@@ -125,6 +125,8 @@ async def resolve_creative_direction(production_id: str) -> PipelineStageResult:
                 ArtifactKind.TREND_RESULT,
                 trend.model_dump_json(indent=2),
             )
+        # Persist the selected genre so the production entity reflects the trending choice
+        await asyncio.to_thread(services.update_production_genre, production_id, genre)
 
     mood = f"{genre} atmosphere"
     concept = CreativeConcept(
