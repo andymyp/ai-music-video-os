@@ -42,6 +42,7 @@ from api.capabilities import InMemoryProviderRegistry
 from api.core.errors import QualityCheckError
 from api.database import make_production_repository, session_scope
 from api.domain.audio import AudioAnalysis, AudioSection, VisualizerData
+from api.media import VisualizerLayer
 from api.domain.enums import ProductionMode, ProductionStatus
 from api.domain.outputs import MetadataPackage, QualityDecision, ShortSegment
 from api.domain.production import Production, _PRODUCTION_FLOW, next_status_in_flow
@@ -365,6 +366,13 @@ async def test_generate_visualizer_matches_frame_grid(services, session_factory)
     assert len(visualizer.frames) == len(visualizer.timestamps)
     assert all(len(bands) == len(visualizer.band_names) for bands in visualizer.frames)
     assert all(0.0 <= value <= 1.0 for bands in visualizer.frames for value in bands)
+    # The composited layer artifact carries the deterministic layout too
+    # (TDD-001 §52, §126).
+    layer = VisualizerLayer.model_validate_json(
+        services.artifact_service.read_text(prod.id, ArtifactKind.VISUALIZER_LAYER)
+    )
+    assert layer.visualizer == visualizer
+    assert layer.layout.visualizer_style == visualizer.style
 
 
 # --- Rendering ----------------------------------------------------------------
@@ -463,6 +471,7 @@ async def test_full_pipeline_reaches_completed_with_deliverables(services, sessi
         ArtifactKind.BACKGROUND_PROMPT,
         ArtifactKind.RADIO,
         ArtifactKind.VISUALIZER_DATA,
+        ArtifactKind.VISUALIZER_LAYER,
         ArtifactKind.MASTER_VIDEO,
         ArtifactKind.SHORT_VIDEO,
         ArtifactKind.SHORT_SEGMENT,

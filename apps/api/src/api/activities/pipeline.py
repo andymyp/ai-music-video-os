@@ -35,7 +35,7 @@ from api.domain.agents import (
     TrendResearchRequest,
     VisualStrategyRequest,
 )
-from api.domain.audio import AudioAnalysis, VisualizerData
+from api.domain.audio import AudioAnalysis
 from api.domain.creative import CreativeConcept
 from api.domain.enums import ProductionMode
 from api.domain.outputs import ShortSegment
@@ -402,38 +402,48 @@ async def analyze_audio(production_id: str) -> PipelineStageResult:
 
 @activity.defn
 async def generate_visualizer(production_id: str) -> PipelineStageResult:
-    """Derive per-frame 5-band visualizer data from the audio analysis."""
+    """Derive FFT band frames from the actual master audio and persist the layer.
+
+    The engine reads the master WAV and computes normalized 5-band values via a
+    fixed FFT (MAD-001 §23), so the visualizer is synchronized with the real
+    audio (PRD-001 FR-018/§24). Style comes from the visual strategy; the
+    sensitivity/smoothing tuning stays at engine defaults (MAD-001 §23 config),
+    and the composed layer (TDD-001 §52 radio region layout) is persisted
+    alongside the data for the Phase 15 renderer.
+    """
     services = get_activity_services()
     analysis = AudioAnalysis.model_validate_json(
         await asyncio.to_thread(
             services.artifact_service.read_text, production_id, ArtifactKind.AUDIO_ANALYSIS
         )
     )
-    frames: list[list[float]] = []
-    for index, timestamp in enumerate(analysis.timestamps):
-        energy = analysis.energy_curve[index] if index < len(analysis.energy_curve) else 0.0
-        spectral = analysis.spectral_curve[index] if index < len(analysis.spectral_curve) else 0.5
-        frames.append(
-            [
-                round(energy * (1.0 - spectral), 4),
-                round(energy * 0.9, 4),
-                round(energy * 0.75, 4),
-                round(energy * 0.5, 4),
-                round(energy * spectral, 4),
-            ]
-        )
-    visualizer = VisualizerData(
-        style="bars",
-        frames=frames,
-        timestamps=[round(float(timestamp), 3) for timestamp in analysis.timestamps],
+    strategy = await asyncio.to_thread(services.get_visual_strategy, production_id)
+    style = (strategy.visualizer_style if strategy else None) or "bars"
+    master_path = services.artifact_service.path_for(production_id, ArtifactKind.AUDIO_MASTER)
+
+    visualizer = await services.visualizer_engine.generate_data(
+        analysis,
+        master_path=master_path,
+        style=style,
+        position="radio-center",
     )
+    layer = services.visualizer_engine.render(visualizer)
     await asyncio.to_thread(
         services.artifact_service.write_text,
         production_id,
         ArtifactKind.VISUALIZER_DATA,
         visualizer.model_dump_json(),
     )
-    return _result("generate_visualizer", f"{len(frames)} frames x {len(visualizer.band_names)} bands")
+    await asyncio.to_thread(
+        services.artifact_service.write_text,
+        production_id,
+        ArtifactKind.VISUALIZER_LAYER,
+        layer.model_dump_json(),
+    )
+    return _result(
+        "generate_visualizer",
+        f"{len(visualizer.frames)} frames x {len(visualizer.band_names)} bands ({style})",
+    )
 
 
 # --- Rendering ----------------------------------------------------------------

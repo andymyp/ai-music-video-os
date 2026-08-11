@@ -55,6 +55,7 @@ class ArtifactKind(str, Enum):
     BACKGROUND_PROMPT = ("visual", "background-prompt.json")
     RADIO = ("visual", "radio.png")
     VISUALIZER_DATA = ("visual", "visualizer.json")
+    VISUALIZER_LAYER = ("visual", "visualizer-layer.json")
     MASTER_VIDEO = ("render", "master-16x9.mp4")
     SHORT_VIDEO = ("render", "short-9x16.mp4")
     METADATA = ("metadata", "metadata.json")

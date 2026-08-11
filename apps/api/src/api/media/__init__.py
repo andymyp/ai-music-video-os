@@ -16,6 +16,11 @@ from api.media.ffmpeg import (
     run_validation_checks,
 )
 from api.media.mastering import AudioMasteringEngine, AudioMasterReport
+from api.media.visualizer import (
+    VisualizerEngine,
+    VisualizerLayer,
+    VisualizerLayout,
+)
 from api.media.models import (
     MASTER_PROFILE,
     SHORT_PROFILE,
@@ -34,6 +39,9 @@ __all__ = [
     "AudioAnalysisEngine",
     "AudioMasteringEngine",
     "AudioMasterReport",
+    "VisualizerEngine",
+    "VisualizerLayer",
+    "VisualizerLayout",
     "build_render_args",
     "probe_to_model",
     "run_validation_checks",

@@ -53,6 +53,32 @@ class AudioMasterReport(BaseModel):
     trailing_silence_seconds: float
 
 
+def read_wav(path: Path) -> tuple[np.ndarray, int, int]:
+    """Decode a PCM WAV into float samples in [-1, 1] with (n, channels).
+
+    Shared by the mastering and visualizer engines so both stages read the same
+    deterministic decode (MAD-001 §19/§23).
+    """
+    try:
+        with wave.open(str(path), "rb") as wav:
+            rate = wav.getframerate()
+            channels = wav.getnchannels()
+            width = wav.getsampwidth()
+            frames = wav.getnframes()
+            raw = wav.readframes(frames)
+    except (wave.Error, OSError) as exc:
+        raise MediaProcessingError(f"cannot decode WAV master source {path}: {exc}") from exc
+
+    dtype = {1: np.uint8, 2: np.int16, 4: np.int32}[width]
+    data = np.frombuffer(raw, dtype=dtype)
+    if width == 1:  # 8-bit unsigned, centred at 128
+        samples = (data.astype(np.float32) - 128.0) / 128.0
+    else:
+        peak = float(np.iinfo(dtype).max)
+        samples = data.astype(np.float32) / peak
+    return samples.reshape(-1, channels).astype(np.float64), rate, channels
+
+
 class AudioMasteringEngine:
     """Normalizes a WAV source into the master audio artifact."""
 
@@ -105,25 +131,7 @@ class AudioMasteringEngine:
 
     @staticmethod
     def _read_wav(path: Path) -> tuple[np.ndarray, int, int]:
-        """Decode a PCM WAV into float samples in [-1, 1] with (n, channels)."""
-        try:
-            with wave.open(str(path), "rb") as wav:
-                rate = wav.getframerate()
-                channels = wav.getnchannels()
-                width = wav.getsampwidth()
-                frames = wav.getnframes()
-                raw = wav.readframes(frames)
-        except (wave.Error, OSError) as exc:
-            raise MediaProcessingError(f"cannot decode WAV master source {path}: {exc}") from exc
-
-        dtype = {1: np.uint8, 2: np.int16, 4: np.int32}[width]
-        data = np.frombuffer(raw, dtype=dtype)
-        if width == 1:  # 8-bit unsigned, centred at 128
-            samples = (data.astype(np.float32) - 128.0) / 128.0
-        else:
-            peak = float(np.iinfo(dtype).max)
-            samples = data.astype(np.float32) / peak
-        return samples.reshape(-1, channels).astype(np.float64), rate, channels
+        return read_wav(path)
 
     @staticmethod
     def _resample(samples: np.ndarray, in_rate: int, out_rate: int) -> np.ndarray:

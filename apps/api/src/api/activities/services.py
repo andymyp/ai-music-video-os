@@ -41,6 +41,7 @@ from api.domain.production import Production, ProductionConfig, next_status_in_f
 from api.media.audio import AudioAnalysisEngine
 from api.media.ffmpeg import FFmpegMediaEngine
 from api.media.mastering import AudioMasteringEngine
+from api.media.visualizer import VisualizerEngine
 from api.providers import register_mock_providers
 from api.storage.artifacts import ArtifactService
 from api.storage.storage import StorageService
@@ -85,6 +86,7 @@ class WorkflowServices:
         visual_prompt_builder: VisualPromptBuilder | None = None,
         image_validator: ImageValidator | None = None,
         radio_registry: RadioAssetRegistry | None = None,
+        visualizer_engine: VisualizerEngine | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self._session_factory = session_factory or create_session_factory(self.settings)
@@ -94,6 +96,7 @@ class WorkflowServices:
         self.media_engine = media_engine or FFmpegMediaEngine()
         self.audio_engine = audio_engine or AudioAnalysisEngine()
         self.audio_mastering_engine = audio_mastering_engine or AudioMasteringEngine()
+        self.visualizer_engine = visualizer_engine or VisualizerEngine()
         # Phase 13 visual support: strategy-driven prompts, structural image
         # validation and the shared radio asset registry (MAD-001 §22).
         self.visual_prompt_builder = visual_prompt_builder or VisualPromptBuilder()
