@@ -618,14 +618,16 @@ async def _master_duration_seconds(services, production_id: str, config) -> floa
 async def validate_master(production_id: str) -> PipelineStageResult:
     """Probe the master render against the master profile expectations."""
     services = get_activity_services()
+    config = await asyncio.to_thread(services.get_production_config, production_id)
+    profile = master_render_profile(config)
     path = services.artifact_service.path_for(production_id, ArtifactKind.MASTER_VIDEO)
     result = await services.media_engine.validate_media(
         path,
         expectations=MediaExpectations(
             require_video=True,
-            width=1920,
-            height=1080,
-            fps=30,
+            width=profile.width,
+            height=profile.height,
+            fps=profile.fps,
             min_duration=5.0,
         ),
     )
@@ -945,9 +947,14 @@ def _visual_concept_summary(concept, visual) -> str:
 
 @activity.defn
 async def run_qc(production_id: str) -> PipelineStageResult:
-    """Run the Quality Control Agent over the produced artifacts (MAD-001 §33)."""
+    """Run the Quality Control Agent over the produced artifacts (MAD-001 §33).
+
+    Deterministic technical checks (existence, integrity, media expectations
+    derived from the render profiles) always run first; the agent then performs
+    the AI-assisted creative assessment against the actual creative brief and
+    records the structured result in the QC report (TDD-001 §59-61).
+    """
     services = get_activity_services()
-    genre, mood = await _genre_mood(services, production_id)
     checks = await _qc_technical_checks(services, production_id)
     decision = await services.agent_runtime.run(
         "quality_control",
@@ -955,7 +962,7 @@ async def run_qc(production_id: str) -> PipelineStageResult:
             production_id=production_id,
             technical_checks=checks,
             mandatory_checks=["music.valid", "master.valid", "short.valid"],
-            creative_context=f"{genre} {mood} production",
+            creative_context=await _qc_creative_context(services, production_id),
         ),
     )
     report = {
@@ -964,6 +971,7 @@ async def run_qc(production_id: str) -> PipelineStageResult:
         "score": decision.score,
         "issues": decision.issues,
         "warnings": decision.warnings,
+        "creative": decision.creative.model_dump() if decision.creative else None,
         "technical_checks": [check.model_dump() for check in checks],
         "created_at": utc_now().isoformat(),
     }
@@ -1050,7 +1058,18 @@ async def complete_production(production_id: str) -> PipelineStageResult:
 
 
 async def _qc_technical_checks(services, production_id: str) -> list[TechnicalCheck]:
-    """Deterministic technical checks fed to the QC Agent (MAD-001 §33)."""
+    """Deterministic technical checks fed to the QC Agent (MAD-001 §33).
+
+    Coverage mirrors PRD-001 FR-023 / TDD-001 §60: file existence, file
+    integrity (non-zero byte; a probeable file), and media-stream expectations
+    derived from the production's render profiles rather than hard-coded
+    dimensions (MAD-001 §31.1, §56). Expected codecs are the encoded
+    profiles' H.264/AAC streams as ffprobe reports them.
+    """
+    config = await asyncio.to_thread(services.get_production_config, production_id)
+    master_profile = master_render_profile(config)
+    short_profile = short_render_profile(config)
+
     required = (
         ArtifactKind.AUDIO_MASTER,
         ArtifactKind.BACKGROUND,
@@ -1063,18 +1082,51 @@ async def _qc_technical_checks(services, production_id: str) -> list[TechnicalCh
     checks: list[TechnicalCheck] = []
     for kind in required:
         present = services.artifact_service.exists(production_id, kind)
+        size = services.artifact_service.size(production_id, kind) if present else 0
         checks.append(TechnicalCheck(name=f"{kind.value}.exists", passed=present, detail=kind.value))
+        # MAD-001 §31.1 / PRD-001 FR-023: no zero-byte files, files not corrupted.
+        checks.append(
+            TechnicalCheck(name=f"{kind.value}.integrity", passed=present and size > 0, detail=kind.value)
+        )
 
+    # The mastered audio is a normalized PCM WAV (MAD-001 §19); the rendered
+    # videos carry H.264 video + AAC audio as configured by their profiles.
     media_checks = (
-        (ArtifactKind.AUDIO_MASTER, MediaExpectations(require_audio=True, min_duration=5.0), "music.valid"),
+        (
+            ArtifactKind.AUDIO_MASTER,
+            MediaExpectations(
+                require_audio=True,
+                min_duration=5.0,
+                min_sample_rate=44100,
+                min_channels=2,
+                audio_codec="pcm_s16le",
+            ),
+            "music.valid",
+        ),
         (
             ArtifactKind.MASTER_VIDEO,
-            MediaExpectations(require_video=True, width=1920, height=1080, fps=30),
+            MediaExpectations(
+                require_audio=True,
+                require_video=True,
+                width=master_profile.width,
+                height=master_profile.height,
+                fps=master_profile.fps,
+                audio_codec="aac",
+                video_codec="h264",
+            ),
             "master.valid",
         ),
         (
             ArtifactKind.SHORT_VIDEO,
-            MediaExpectations(require_video=True, width=1080, height=1920, fps=30),
+            MediaExpectations(
+                require_audio=True,
+                require_video=True,
+                width=short_profile.width,
+                height=short_profile.height,
+                fps=short_profile.fps,
+                audio_codec="aac",
+                video_codec="h264",
+            ),
             "short.valid",
         ),
     )
@@ -1086,6 +1138,53 @@ async def _qc_technical_checks(services, production_id: str) -> list[TechnicalCh
         detail = ",".join(check.name for check in result.failures)
         checks.append(TechnicalCheck(name=name, passed=result.valid, detail=detail))
     return checks
+
+
+async def _qc_creative_context(services, production_id: str) -> str:
+    """Flatten the persisted creative brief for the creative QC assessment.
+
+    Gives the AI assessor the actual creative direction — concept, music and
+    visual strategy, branding, metadata and the selected short segment — so the
+    five dimensions of MASTER §28 are judged against the production rather than
+    a bare genre label (TDD-001 §61). Reuses the same flatteners as the
+    metadata prompt (TDD-001 §57).
+    """
+    production = await asyncio.to_thread(services.get_production, production_id)
+    config = await asyncio.to_thread(services.get_production_config, production_id)
+    concept = await asyncio.to_thread(services.get_concept, production_id)
+    music = await asyncio.to_thread(services.get_music_strategy, production_id)
+    visual = await asyncio.to_thread(services.get_visual_strategy, production_id)
+    metadata = _read_json(services, production_id, ArtifactKind.METADATA)
+    segment = _read_json(services, production_id, ArtifactKind.SHORT_SEGMENT)
+
+    parts: list[str] = []
+    genre = (concept.genre if concept else None) or (production.genre or "instrumental")
+    mood = (concept.mood if concept else None) or f"{genre} atmosphere"
+    parts.append(f"genre: {genre}, mood: {mood}")
+    if concept is not None and concept.theme:
+        parts.append(f"theme: {concept.theme}")
+    music_summary = _music_concept_summary(concept, music)
+    if music_summary:
+        parts.append(f"music: {music_summary}")
+    visual_summary = _visual_concept_summary(concept, visual)
+    if visual_summary:
+        parts.append(f"visual: {visual_summary}")
+    branding = (production.branding_text or (config.branding.text if config is not None else None)) or None
+    if branding:
+        parts.append(f"branding: {branding}")
+    if isinstance(metadata, dict):
+        master = metadata.get("master") or {}
+        short = metadata.get("short") or {}
+        if master.get("title"):
+            parts.append(f"master metadata title: {master['title']!r}")
+        if short.get("title"):
+            parts.append(f"short metadata title: {short['title']!r}")
+    if isinstance(segment, dict) and segment.get("duration_seconds"):
+        parts.append(
+            f"short segment: {segment['duration_seconds']}s clip starting at "
+            f"{segment.get('start_seconds', 0)}s"
+        )
+    return "; ".join(parts)
 
 
 def _read_json(services, production_id: str, kind: ArtifactKind) -> object:

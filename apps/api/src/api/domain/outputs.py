@@ -63,18 +63,56 @@ class MetadataPackage(BaseModel):
     short: Metadata
 
 
+#: The AI-assessed creative dimensions (MAD-001 §31.2, TDD-001 §61). Branding
+#: presence is judged here rather than deterministically because the drawtext
+#: outcome is only verifiable by inspecting rendered frames.
+CREATIVE_DIMENSIONS = (
+    "visual_coherence",
+    "visualizer_placement",
+    "branding_presence",
+    "content_consistency",
+    "metadata_relevance",
+)
+
+
+class CreativeAssessment(BaseModel):
+    """Structured creative QC result (TDD-001 §61; MAD-001 §31.2).
+
+    One 0-1 score per AI-assessed creative dimension (visual coherence,
+    visualizer placement, branding presence, content consistency, metadata
+    relevance) plus the mean composite. AI QC results are structured so they can
+    be recorded in the QC report and compared across productions.
+    """
+
+    visual_coherence: float = Field(default=0.5, ge=0.0, le=1.0)
+    visualizer_placement: float = Field(default=0.5, ge=0.0, le=1.0)
+    branding_presence: float = Field(default=0.5, ge=0.0, le=1.0)
+    content_consistency: float = Field(default=0.5, ge=0.0, le=1.0)
+    metadata_relevance: float = Field(default=0.5, ge=0.0, le=1.0)
+    remarks: str = Field(default="", max_length=1000)
+
+    @property
+    def composite(self) -> float:
+        """Mean of the five dimension scores, the creative component of the gate."""
+        total = sum(getattr(self, dim) for dim in CREATIVE_DIMENSIONS)
+        return round(total / len(CREATIVE_DIMENSIONS), 3)
+
+
 class QualityDecision(BaseModel):
     """Outcome of quality control for a deliverable (TDD-001 §131).
 
     A decision cannot both pass and carry mandatory issues: a production may
     only complete when QC passes (MAD-001 §33), so the model rejects that
-    contradiction instead of silently downgrading it.
+    contradiction instead of silently downgrading it. ``creative`` carries the
+    structured AI assessment when an LLM is available (MAD-001 §31.2); it is
+    informational — the deterministic mandatory issues remain the gate.
     """
 
     passed: bool
     issues: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     score: float = Field(default=0.0, ge=0.0, le=1.0)
+    creative: CreativeAssessment | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> "QualityDecision":

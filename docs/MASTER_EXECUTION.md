@@ -1918,7 +1918,7 @@ Maintain the following table in the project:
 | 15    | Master Rendering        | COMPLETED   |
 | 16    | Short Generation        | COMPLETED   |
 | 17    | Metadata                | COMPLETED   |
-| 18    | Quality Control         | NOT_STARTED |
+| 18    | Quality Control         | COMPLETED   |
 | 19    | API                     | NOT_STARTED |
 | 20    | Frontend                | NOT_STARTED |
 | 21    | Recovery / Cancellation | NOT_STARTED |

@@ -26,7 +26,14 @@ from api.domain.enums import (
     ProductionMode,
     ProductionStatus,
 )
-from api.domain.outputs import Metadata, MetadataPackage, QualityDecision, ShortSegment
+from api.domain.outputs import (
+    CREATIVE_DIMENSIONS,
+    CreativeAssessment,
+    Metadata,
+    MetadataPackage,
+    QualityDecision,
+    ShortSegment,
+)
 from api.domain.production import (
     PRODUCTION_TRANSITIONS,
     TERMINAL_STATUSES,
@@ -57,6 +64,8 @@ __all__ = [
     "Metadata",
     "MetadataPackage",
     "QualityDecision",
+    "CreativeAssessment",
+    "CREATIVE_DIMENSIONS",
     "ShortSegment",
     # audio
     "AudioAnalysis",

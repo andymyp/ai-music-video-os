@@ -603,6 +603,250 @@ async def test_run_qc_passes_with_complete_artifacts(services, session_factory):
     assert result.ok
     report = json.loads(services.artifact_service.read_text(prod.id, ArtifactKind.QC_REPORT))
     assert report["passed"] is True
+    # TDD-001 §61: the AI creative result is structured per dimension.
+    assert report["creative"] is not None
+    assert set(report["creative"]) >= {
+        "visual_coherence",
+        "visualizer_placement",
+        "branding_presence",
+        "content_consistency",
+        "metadata_relevance",
+    }
+    assert all(0.0 <= report["creative"][dim] <= 1.0 for dim in report["creative"] if isinstance(report["creative"][dim], float))
+
+
+# --- Phase 18: structured creative QC (MASTER §28, TDD-001 §59-61) ------------
+
+def test_creative_assessment_composite_is_mean():
+    from api.domain.outputs import CREATIVE_DIMENSIONS, CreativeAssessment
+
+    assessment = CreativeAssessment(
+        visual_coherence=1.0,
+        visualizer_placement=0.5,
+        branding_presence=0.25,
+        content_consistency=0.75,
+        metadata_relevance=0.5,
+    )
+    assert assessment.composite == 0.6
+    assert set(CREATIVE_DIMENSIONS) == {
+        "visual_coherence",
+        "visualizer_placement",
+        "branding_presence",
+        "content_consistency",
+        "metadata_relevance",
+    }
+
+
+def test_creative_assessment_rejects_out_of_range_dimension():
+    from api.domain.outputs import CreativeAssessment
+
+    with pytest.raises(ValueError):
+        CreativeAssessment(visual_coherence=1.5)
+
+
+async def test_qc_agent_returns_structured_creative_assessment():
+    """TDD-001 §61: AI QC results are structured per creative dimension."""
+    from api.agents import Tool
+    from api.agents.quality_control import QualityControlAgent
+    from api.agents.tools import ToolRegistry
+    from api.capabilities import StructuredGenerationRequest, StructuredResult
+    from api.domain import QualityControlRequest, TechnicalCheck
+
+    recorded: list[str] = []
+
+    class CreativeLLMTool(Tool):
+        name = "llm_generate"
+        description = "recording creative llm"
+        input_schema = StructuredGenerationRequest
+        output_schema = StructuredResult
+
+        async def run(self, input):
+            recorded.append(input.prompt)
+            return StructuredResult(
+                data={
+                    "visual_coherence": 1.0,
+                    "visualizer_placement": 0.8,
+                    "branding_presence": 0.6,
+                    "content_consistency": 0.9,
+                    "metadata_relevance": 0.7,
+                    "remarks": "solid composition",
+                },
+                model="spy",
+            )
+
+    tools = ToolRegistry()
+    tools.register(CreativeLLMTool())
+    agent = QualityControlAgent(tools)
+    decision = await agent.execute(QualityControlRequest(
+        technical_checks=[TechnicalCheck(name="master.valid", passed=True)],
+        mandatory_checks=["master.valid"],
+        creative_context="lofi night drive production",
+    ))
+    assert decision.passed
+    assert decision.creative is not None
+    assert decision.creative.visual_coherence == 1.0
+    assert decision.creative.metadata_relevance == 0.7
+    assert decision.creative.remarks == "solid composition"
+    assert decision.creative.composite == 0.8
+    # composite = 0.8 creative * 0.5 + 1.0 technical * 0.5 (MAD-001 §31.3)
+    assert decision.score == 0.9
+    # the prompt names the five assessed dimensions (MAD-001 §31.2)
+    assert "visual coherence" in recorded[0]
+    assert "metadata relevance" in recorded[0]
+
+
+async def test_qc_agent_creative_never_overrides_mandatory_gate():
+    """A perfect creative score cannot pass a broken render (MAD-001 §31.3)."""
+    from api.agents import Tool
+    from api.agents.quality_control import QualityControlAgent
+    from api.agents.tools import ToolRegistry
+    from api.capabilities import StructuredGenerationRequest, StructuredResult
+    from api.domain import QualityControlRequest, TechnicalCheck
+
+    class PerfectLLMTool(Tool):
+        name = "llm_generate"
+        description = "perfect creative llm"
+        input_schema = StructuredGenerationRequest
+        output_schema = StructuredResult
+
+        async def run(self, input):
+            return StructuredResult(
+                data={
+                    "visual_coherence": 1.0,
+                    "visualizer_placement": 1.0,
+                    "branding_presence": 1.0,
+                    "content_consistency": 1.0,
+                    "metadata_relevance": 1.0,
+                },
+                model="spy",
+            )
+
+    tools = ToolRegistry()
+    tools.register(PerfectLLMTool())
+    agent = QualityControlAgent(tools)
+    decision = await agent.execute(QualityControlRequest(
+        technical_checks=[
+            TechnicalCheck(name="master.valid", passed=True),
+            TechnicalCheck(name="short.valid", passed=False),
+        ],
+        mandatory_checks=["master.valid", "short.valid"],
+        creative_context="context",
+    ))
+    assert not decision.passed
+    assert decision.issues == ["short.valid"]
+    assert decision.creative is not None and decision.creative.composite == 1.0
+
+
+async def test_qc_technical_checks_are_config_derived(services, session_factory, monkeypatch):
+    """Expected resolution/FPS come from the render profiles, not hard-coded
+    1920x1080 / 1080x1920 (MAD-001 §56, PRD-001 FR-023)."""
+    from api.activities.pipeline import _qc_technical_checks
+    from api.domain.production import ProductionConfig
+
+    prod = _make_production(session_factory)
+    with session_scope(session_factory) as session:
+        make_production_repository(session).save_config(
+            prod.id,
+            ProductionConfig(
+                mode=ProductionMode.GENRE,
+                genre="lofi",
+                master_width=1280,
+                master_height=720,
+                short_width=720,
+                short_height=1280,
+            ),
+        )
+    for kind in (
+        ArtifactKind.AUDIO_MASTER,
+        ArtifactKind.BACKGROUND,
+        ArtifactKind.RADIO,
+        ArtifactKind.MASTER_VIDEO,
+        ArtifactKind.SHORT_VIDEO,
+        ArtifactKind.METADATA,
+        ArtifactKind.MANIFEST,
+    ):
+        services.artifact_service.write(prod.id, kind, b"non-empty")
+
+    captured: list[MediaExpectations] = []
+    real = services.media_engine.validate_media
+
+    async def spy(path, *, expectations=None):
+        captured.append(expectations)
+        return await real(path, expectations=expectations)
+
+    monkeypatch.setattr(services.media_engine, "validate_media", spy)
+
+    checks = await _qc_technical_checks(services, prod.id)
+    assert all(check.passed for check in checks)
+
+    master_exp = next(e for e in captured if e.require_video and e.width == 1280)
+    assert master_exp.height == 720 and master_exp.fps == 30
+    assert master_exp.video_codec == "h264" and master_exp.audio_codec == "aac"
+    short_exp = next(e for e in captured if e.require_video and e.width == 720)
+    assert short_exp.height == 1280 and short_exp.fps == 30
+    assert short_exp.video_codec == "h264" and short_exp.audio_codec == "aac"
+    music_exp = next(e for e in captured if not e.require_video)
+    assert music_exp.audio_codec == "pcm_s16le"
+    assert music_exp.min_sample_rate == 44100 and music_exp.min_channels == 2
+
+
+async def test_qc_technical_checks_include_integrity_and_exists(services, session_factory):
+    """Every required artifact is checked for existence and non-zero integrity
+    (MAD-001 §31.1, PRD-001 FR-023)."""
+    from api.activities.pipeline import _qc_technical_checks
+
+    prod = _make_production(session_factory)
+    for kind in (
+        ArtifactKind.AUDIO_MASTER,
+        ArtifactKind.BACKGROUND,
+        ArtifactKind.RADIO,
+        ArtifactKind.MASTER_VIDEO,
+        ArtifactKind.SHORT_VIDEO,
+        ArtifactKind.METADATA,
+        ArtifactKind.MANIFEST,
+    ):
+        services.artifact_service.write(prod.id, kind, b"non-empty")
+
+    checks = await _qc_technical_checks(services, prod.id)
+    names = {check.name for check in checks}
+    for kind in (ArtifactKind.MASTER_VIDEO, ArtifactKind.METADATA):
+        assert f"{kind.value}.exists" in names
+        assert f"{kind.value}.integrity" in names
+    assert all(check.passed for check in checks)
+
+
+async def test_qc_technical_checks_flag_missing_or_empty_artifact(services, session_factory):
+    """A missing or zero-byte artifact fails its existence/integrity checks."""
+    from api.activities.pipeline import _qc_technical_checks
+
+    prod = _make_production(session_factory)
+    for kind in (ArtifactKind.BACKGROUND, ArtifactKind.RADIO):
+        services.artifact_service.write(prod.id, kind, b"non-empty")
+    services.artifact_service.write(prod.id, ArtifactKind.METADATA, b"")
+
+    checks = await _qc_technical_checks(services, prod.id)
+    by_name = {check.name: check for check in checks}
+    assert not by_name[f"{ArtifactKind.MASTER_VIDEO.value}.exists"].passed
+    assert not by_name[f"{ArtifactKind.METADATA.value}.integrity"].passed
+    assert by_name[f"{ArtifactKind.BACKGROUND.value}.exists"].passed
+
+
+async def test_qc_creative_context_uses_persisted_brief(services, session_factory):
+    """The creative assessment context carries the real production brief
+    (TDD-001 §61): genre/mood, music/visual summaries, branding and metadata."""
+    from api.activities.pipeline import _qc_creative_context
+
+    prod = _make_production(session_factory, branding_text="MY CHANNEL")
+    await run_pipeline(prod.id, stop_after="generate_metadata")
+    context = await _qc_creative_context(services, prod.id)
+    assert "lofi" in context and "lofi atmosphere" in context
+    assert "music:" in context
+    assert "visual:" in context
+    assert "MY CHANNEL" in context
+    package = MetadataPackage.model_validate_json(
+        services.artifact_service.read_text(prod.id, ArtifactKind.METADATA)
+    )
+    assert package.master.title in context
 
 
 async def test_generate_manifest_lists_all_artifacts(services, session_factory):
