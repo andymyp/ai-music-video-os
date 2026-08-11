@@ -16,6 +16,7 @@ Every external call happens inside an activity; the workflow itself only calls
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -104,6 +105,28 @@ PIPELINE_STAGES: tuple[_Stage, ...] = (
 
 #: Stage names in pipeline order (exported for tests and reporting).
 PIPELINE_STAGE_NAMES: tuple[str, ...] = tuple(stage.name for stage in PIPELINE_STAGES)
+
+#: Statuses that end a workflow run: never continued, never resumed past.
+_TERMINAL_RUN_STATUSES = frozenset(
+    {ProductionStatus.COMPLETED, ProductionStatus.FAILED, ProductionStatus.CANCELLED}
+)
+
+
+def should_continue_as_new(
+    completed_steps: int,
+    max_steps: int,
+    status: ProductionStatus,
+) -> bool:
+    """Whether the workflow must bound its history with ``continue_as_new``.
+
+    A run continues when it reached the per-run step cap without the production
+    reaching a terminal state. The next run re-reads the persisted status and
+    resumes exactly where this one stopped (TDD-001 §116-117), so the decision
+    is a pure function of run-local counters plus the persisted state.
+    """
+    if status in _TERMINAL_RUN_STATUSES:
+        return False
+    return completed_steps >= max_steps
 
 
 class ProductionWorkflowInput(BaseModel):
@@ -198,6 +221,14 @@ class ProductionWorkflow:
                         ProductionStatus.CANCELLED,
                     ):
                         break
+        except asyncio.CancelledError:
+            # Cancellation requested (POST /api/productions/{id}/cancel). The
+            # API already transitioned the production to CANCELLED before asking
+            # Temporal to cancel; here we persist the run's terminal status so
+            # cancel/progress endpoints see a complete lifecycle, then let the
+            # cancellation propagate to the in-flight activities (TDD-001 §86).
+            await self._record_cancelled_run(config, input, workflow_id, attempt)
+            raise
         except Exception as exc:
             await self._record_run(
                 config,
@@ -213,12 +244,9 @@ class ProductionWorkflow:
             raise
 
         # Bound workflow history on very long runs; the production's persisted
-        # status lets the new run pick up exactly where this one stopped.
-        if len(completed) >= config.max_steps_per_run and status not in (
-            ProductionStatus.COMPLETED,
-            ProductionStatus.FAILED,
-            ProductionStatus.CANCELLED,
-        ):
+        # status lets the new run pick up exactly where this one stopped
+        # (TDD-001 §116-117: application restart -> load status -> resume).
+        if should_continue_as_new(len(completed), config.max_steps_per_run, status):
             workflow.continue_as_new(input)
 
         return await self._finish(config, input, workflow_id, attempt, completed, status)
@@ -231,6 +259,33 @@ class ProductionWorkflow:
             record,
             start_to_close_timeout=config.validation_timeout,
             retry_policy=default_activity_retry_policy(),
+        )
+
+    async def _record_cancelled_run(
+        self,
+        config: WorkflowConfig,
+        input: ProductionWorkflowInput,
+        workflow_id: str,
+        attempt: int,
+    ) -> None:
+        """Persist the run's terminal ``cancelled`` status during cleanup.
+
+        Called from the ``CancelledError`` handler. The record activity is
+        shielded so the cancellation that triggered cleanup cannot cancel the
+        write itself (TDD-001 §86: cancellation propagates through Temporal to
+        the activity and media process).
+        """
+        await asyncio.shield(
+            self._record_run(
+                config,
+                WorkflowRunRecord(
+                    workflow_id=workflow_id,
+                    production_id=input.production_id,
+                    task_queue=config.task_queue,
+                    status="cancelled",
+                    attempt=attempt,
+                ),
+            )
         )
 
     async def _load_status(self, config: WorkflowConfig, production_id: str, completed: list[str]) -> ProductionStatus:

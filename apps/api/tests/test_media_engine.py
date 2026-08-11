@@ -524,6 +524,65 @@ async def test_provider_error_propagates(tmp_path):
         await engine.render_master(_request(tmp_path), profile=TEST_PROFILE)
 
 
+# --- Process cancellation / timeout (TDD-001 §86, §88) ------------------------
+
+class _HangingProcess:
+    """Fake subprocess whose ``communicate`` never returns until cancelled."""
+
+    def __init__(self) -> None:
+        self.terminated = False
+        self.killed = False
+        self.returncode = None
+        self.stdout = None
+        self.stderr = None
+
+    async def communicate(self):
+        await asyncio.Event().wait()  # block until the task is cancelled
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait(self) -> int:
+        return 0
+
+
+async def test_run_process_terminates_child_on_cancellation(monkeypatch):
+    """Cancelling a long-running FFmpeg terminates the child process safely and
+    re-raises ``CancelledError`` (TDD-001 §86: cancellation propagates from the
+    activity down to the media process)."""
+    proc = _HangingProcess()
+
+    async def _fake_spawn(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_spawn)
+
+    task = asyncio.create_task(_run_process(["ffmpeg", "-loglevel", "error", "in.mp4"]))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert proc.terminated or proc.killed
+
+
+async def test_run_process_terminates_child_on_timeout(monkeypatch):
+    """A timed-out FFmpeg is terminated and surfaced as ``MediaProcessingError``
+    (a media failure is cleaned up, not left orphaned)."""
+    proc = _HangingProcess()
+
+    async def _fake_spawn(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_spawn)
+
+    with pytest.raises(MediaProcessingError, match="timed out"):
+        await _run_process(["ffmpeg", "-i", "in.mp4"], timeout=0.01)
+    assert proc.terminated
+
+
 # --- Real FFmpeg integration (skipped when FFmpeg is absent) ------------------
 
 @pytest.fixture

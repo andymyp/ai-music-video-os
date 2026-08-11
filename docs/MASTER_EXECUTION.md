@@ -1921,7 +1921,7 @@ Maintain the following table in the project:
 | 18    | Quality Control         | COMPLETED   |
 | 19    | API                     | COMPLETED   |
 | 20    | Frontend                | COMPLETED   |
-| 21    | Recovery / Cancellation | NOT_STARTED |
+| 21    | Recovery / Cancellation | COMPLETED   |
 | 22    | Observability           | NOT_STARTED |
 | 23    | Security                | NOT_STARTED |
 | 24    | End-to-End Integration  | NOT_STARTED |
