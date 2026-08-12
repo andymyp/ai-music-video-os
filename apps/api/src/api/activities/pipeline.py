@@ -28,7 +28,8 @@ from api.activities.production import get_activity_services
 from api.capabilities import ImageGenerationRequest, MusicGenerationRequest
 from api.core.clock import utc_now
 from api.core.errors import ConfigurationError, QualityCheckError, WorkflowError
-from api.core.observability import instrument
+from api.core.observability import get_metrics, instrument
+from api.core.system import sample_system_resources
 from api.domain.agents import (
     MetadataRequest,
     MusicStrategyRequest,
@@ -511,13 +512,24 @@ def _visualizer_frames_dir(services, production_id: str) -> Path:
 async def render_master(production_id: str) -> PipelineStageResult:
     """Compose background + radio + visualizer + branding + audio (MAD-001 §24).
 
+    Holds a :class:`~api.core.resources.RenderGate` permit for the duration of
+    the FFmpeg encode so at most ``max_render_workers`` heavy renders run
+    concurrently on the target laptop (MASTER §40, TDD-001 §87).
+    """
+    services = get_activity_services()
+    async with services.render_gate:
+        return await _render_master(services, production_id)
+
+
+async def _render_master(services, production_id: str) -> PipelineStageResult:
+    """Compose background + radio + visualizer + branding + audio (MAD-001 §24).
+
     Geometry (radio position/scale, visualizer region, branding anchor) comes
     from the persisted VISUALIZER_LAYER layout (TDD-001 §52); the per-frame bar
     sprites are rendered from the visualizer data and overlaid inside the radio
     (TDD-001 §52). Encoding honors the production's configured master
     resolution/FPS through a render profile (PRD-001 §27, MAD-001 §56).
     """
-    services = get_activity_services()
     production = await asyncio.to_thread(services.get_production, production_id)
     config = await asyncio.to_thread(services.get_production_config, production_id)
     profile = master_render_profile(config)
@@ -724,6 +736,18 @@ def _short_frames_dir(services, production_id: str) -> Path:
 async def render_short(production_id: str) -> PipelineStageResult:
     """Trim the selected segment into the 9:16 short render (MAD-001 §25-27).
 
+    Holds a :class:`~api.core.resources.RenderGate` permit for the duration of
+    the FFmpeg encode so at most ``max_render_workers`` heavy renders run
+    concurrently on the target laptop (MASTER §40, TDD-001 §87).
+    """
+    services = get_activity_services()
+    async with services.render_gate:
+        return await _render_short(services, production_id)
+
+
+async def _render_short(services, production_id: str) -> PipelineStageResult:
+    """Trim the selected segment into the 9:16 short render (MAD-001 §25-27).
+
     The short reuses the master's visualizer data — never regenerates
     independent music (PRD-001 §24) — sliced to the segment window so the bars
     stay synchronized with the trimmed audio (TDD-001 §129), and composes the
@@ -732,7 +756,6 @@ async def render_short(production_id: str) -> PipelineStageResult:
     honors the production's configured short resolution/FPS (PRD-001 §28,
     MAD-001 §56).
     """
-    services = get_activity_services()
     production = await asyncio.to_thread(services.get_production, production_id)
     config = await asyncio.to_thread(services.get_production_config, production_id)
     profile = short_render_profile(config)
@@ -1060,6 +1083,12 @@ async def complete_production(production_id: str) -> PipelineStageResult:
     """Drive the production to COMPLETED (idempotent final transition)."""
     services = get_activity_services()
     status = await asyncio.to_thread(services.complete_production, production_id)
+    # Phase 25: capture a final RAM/CPU/disk snapshot so the performance budget
+    # includes the full render footprint (MASTER §40, TDD-001 §145).
+    get_metrics().record_performance_sample(
+        production_id,
+        sample_system_resources(services.settings.app_data_dir),
+    )
     return _result("complete_production", status.value)
 
 

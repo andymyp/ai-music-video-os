@@ -52,6 +52,9 @@ class NullMetricsStore:
         """No-op — nothing to record."""
         return None
 
+    def record_performance_sample(self, production_id: str, sample: Any) -> None:
+        """No-op — nothing to record."""
+
     def count(self) -> int:
         return 0
 

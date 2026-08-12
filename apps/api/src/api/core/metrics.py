@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from api.core.clock import utc_now
+from api.core.system import SystemResourceSample
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS metrics (
@@ -166,6 +167,21 @@ class MetricsStore:
                 duration_ms=duration_ms,
             )
         return duration_ms
+
+    def record_performance_sample(
+        self, production_id: str, sample: SystemResourceSample
+    ) -> None:
+        """Record a Phase 25 system-resource snapshot for a production.
+
+        The snapshot (RAM %, CPU %, disk %, process RSS) is stored in the row's
+        JSON ``detail`` so the benchmark report and the metrics inspector can
+        reconstruct the machine state during a production (MASTER §40).
+        """
+        self.record(
+            "performance.sample",
+            production_id=production_id,
+            detail=sample.to_dict(),
+        )
 
     # --- inspection ----------------------------------------------------------
 

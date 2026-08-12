@@ -1925,7 +1925,7 @@ Maintain the following table in the project:
 | 22    | Observability           | COMPLETED   |
 | 23    | Security                | COMPLETED   |
 | 24    | End-to-End Integration  | COMPLETED   |
-| 25    | Performance Validation  | NOT_STARTED |
+| 25    | Performance Validation  | COMPLETED   |
 | 26    | Final Acceptance        | NOT_STARTED |
 
 Allowed statuses:

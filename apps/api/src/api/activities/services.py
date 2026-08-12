@@ -21,6 +21,7 @@ from api.agents.runtime import AgentRuntime, build_agent_runtime
 from api.capabilities import Capability, InMemoryProviderRegistry, ProviderRegistry
 from api.config.settings import AppSettings, get_settings
 from api.core.errors import ConfigurationError, WorkflowError
+from api.core.resources import RenderGate
 from api.database import (
     create_session_factory,
     make_production_repository,
@@ -88,12 +89,16 @@ class WorkflowServices:
         radio_registry: RadioAssetRegistry | None = None,
         visualizer_engine: VisualizerEngine | None = None,
         metrics: Any | None = None,
+        render_gate: RenderGate | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self._session_factory = session_factory or create_session_factory(self.settings)
         #: Phase 22 observability store (``None`` in tests that don't configure
         #: one); lifecycle recording in ``record_workflow_run`` is a no-op then.
         self.metrics = metrics
+        #: Phase 25 bounded-render gate: enforces ``max_render_workers`` so only
+        #: that many FFmpeg renders run concurrently (MASTER §40-41, TDD-001 §87).
+        self.render_gate = render_gate or RenderGate(self.settings.max_render_workers)
         if provider_registry is None and agent_runtime is None:
             provider_registry = build_provider_registry(self.settings)
         self.provider_registry = provider_registry
