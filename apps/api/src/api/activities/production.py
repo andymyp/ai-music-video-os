@@ -57,6 +57,13 @@ async def validate_production_input(input) -> ValidationReport:
     availability and disk space. Invalid requests terminate before expensive
     generation; permanent errors are not retried (MAD-001 §52).
     """
+    # The activity is deliberately unannotated (annotating with
+    # ProductionWorkflowInput would create a circular import); the default JSON
+    # converter therefore delivers a plain mapping unless a pydantic converter is
+    # wired. Normalize to the model so the checks below always see typed fields.
+    from api.workflows.production import ProductionWorkflowInput
+
+    input = ProductionWorkflowInput.model_validate(input)
     services = get_activity_services()
     checked: list[str] = []
     errors: list[str] = []

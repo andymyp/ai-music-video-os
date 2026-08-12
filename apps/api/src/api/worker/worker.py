@@ -11,10 +11,10 @@ from __future__ import annotations
 import asyncio
 
 from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
-from api.activities import WorkflowServices, set_activity_services
-from api.activities import ALL_ACTIVITIES as _ALL_ACTIVITY_NAMES
+from api.activities import WorkflowServices, resolve_activity_functions, set_activity_services
 from api.config.settings import AppSettings, get_settings
 from api.core.logging import configure_logging
 from api.core.observability import get_metrics, init_metrics
@@ -46,26 +46,17 @@ async def run_worker(settings: AppSettings | None = None) -> None:
     )
     set_activity_services(services)
 
-    # Resolve the actual activity functions by name from the core and pipeline
-    # activity modules (avoids circular imports at worker startup).
-    activity_modules = [
-        __import__("api.activities.production", fromlist=["_ACTIVITY_DISPATCH"]),
-        __import__("api.activities.pipeline", fromlist=["_ACTIVITY_DISPATCH"]),
-    ]
-    activity_funcs: list[object] = []
-    for name in _ALL_ACTIVITY_NAMES:
-        for module in activity_modules:
-            func = getattr(module, name, None)
-            if func is not None:
-                activity_funcs.append(func)
-                break
-
-    client = await Client.connect(settings.temporal_address)
+    # Pydantic data converter so workflow input/output and activity args
+    # round-trip as models, not plain dicts (TDD-001 §23).
+    client = await Client.connect(
+        settings.temporal_address,
+        data_converter=pydantic_data_converter,
+    )
     worker = Worker(
         client,
         task_queue=settings.temporal_task_queue,
         workflows=[ProductionWorkflow, FoundationSmokeWorkflow],
-        activities=activity_funcs,
+        activities=resolve_activity_functions(),
     )
     await worker.run()
 

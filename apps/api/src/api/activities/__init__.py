@@ -8,6 +8,8 @@ startup, tests do it directly). Phase 09 contributed the core activities; Phase
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from api.activities.models import (
     AgentStep,
     AgentStepResult,
@@ -32,8 +34,33 @@ from api.activities.services import WorkflowServices
 #: Every activity a Temporal worker must register for the production workflow.
 ALL_ACTIVITIES = CORE_ACTIVITIES + PIPELINE_ACTIVITIES
 
+
+def resolve_activity_functions(names: Sequence[str] = ALL_ACTIVITIES) -> list[object]:
+    """Resolve registered activity *names* to their ``@activity.defn`` callables.
+
+    ``CORE_ACTIVITIES``/``PIPELINE_ACTIVITIES`` are name lists because the two
+    activity modules cannot import each other; the Temporal worker and the Phase
+    26 acceptance E2E both need the decorated functions. Each name is looked up
+    in the core module then the pipeline module and returned in order.
+    """
+    from api.activities import pipeline as _pipeline
+    from api.activities import production as _production
+
+    funcs: list[object] = []
+    for name in names:
+        for module in (_production, _pipeline):
+            func = getattr(module, name, None)
+            if func is not None:
+                funcs.append(func)
+                break
+        else:
+            raise KeyError(f"no activity named {name!r}")
+    return funcs
+
+
 __all__ = [
     "ALL_ACTIVITIES",
+    "resolve_activity_functions",
     "CORE_ACTIVITIES",
     "PIPELINE_ACTIVITIES",
     "WorkflowServices",

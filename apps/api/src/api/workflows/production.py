@@ -24,7 +24,6 @@ from pydantic import BaseModel, Field
 
 from temporalio import workflow
 
-from api.activities.models import WorkflowRunRecord
 from api.domain.enums import ProductionMode, ProductionStatus
 from api.domain.production import next_status_in_flow
 from api.workflows.config import (
@@ -36,8 +35,10 @@ from api.workflows.config import (
 
 with workflow.unsafe.imports_passed_through():
     # These modules must not be imported during workflow replay (they pull in
-    # non-deterministic / heavy dependencies); only the workflow defn below
-    # executes in the sandbox.
+    # non-deterministic / heavy dependencies such as numpy via the media and
+    # agent layers, and they are already loaded in the outer process by the
+    # worker); only the workflow defn below executes in the sandbox.
+    from api.activities.models import WorkflowRunRecord
     from api.activities.production import (
         advance_production,
         load_production_status,
@@ -157,6 +158,11 @@ class ProductionWorkflow:
 
     @workflow.run
     async def run(self, input: ProductionWorkflowInput) -> ProductionWorkflowOutput:
+        # The default JSON data converter hands the sandbox a plain mapping
+        # unless a pydantic converter is wired on the client. Normalize so the
+        # body below always sees the model regardless of the caller's converter
+        # (temporalio.contrib.pydantic handles it; the guard is defense-in-depth).
+        input = ProductionWorkflowInput.model_validate(input)
         config: WorkflowConfig = default_workflow_config()
         attempt = workflow.info().attempt
         workflow_id = workflow.info().workflow_id
@@ -242,6 +248,20 @@ class ProductionWorkflow:
                 ),
             )
             raise
+
+        # ``complete_production`` performs its final QUALITY_CHECK -> COMPLETED
+        # transition inside the activity (the last stage has advance=False), so
+        # the local ``status`` is one step behind. Re-read the authoritative
+        # persisted status so the returned output and the continue-as-new check
+        # reflect the production's true terminal state (MASTER §20, §69).
+        status = ProductionStatus(
+            await workflow.execute_activity(
+                load_production_status,
+                input.production_id,
+                start_to_close_timeout=config.validation_timeout,
+                retry_policy=default_activity_retry_policy(),
+            )
+        )
 
         # Bound workflow history on very long runs; the production's persisted
         # status lets the new run pick up exactly where this one stopped

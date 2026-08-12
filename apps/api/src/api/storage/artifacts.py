@@ -4,13 +4,13 @@ Layout matches TDD-001 §62 / MASTER_EXECUTION.md §13:
 
     data/productions/<production-id>/
     ├── input/       raw source material (downloads)
-    ├── planning/    production.json, strategies, concept, trends
+    ├── planning/    production-plan.json, strategies, concept, trends
     ├── audio/       source + master audio, analysis
     ├── visual/      background, radio, visualizer data
     ├── render/      master-16x9.mp4, short-9x16.mp4
     ├── metadata/    metadata.json
     ├── qc/          qc-report.json
-    └── manifest/    manifest.json
+    └── manifest/    production.json
 
 Artifacts use the deterministic names from TDD-001 §63 so paths are stable and
 reproducible. The service delegates file operations to a :class:`StorageService`
@@ -41,7 +41,7 @@ class ArtifactKind(str, Enum):
     """Canonical artifacts with their subdirectory and deterministic filename
     (TDD-001 §63). The enum value is the filename; ``subdir`` is the folder."""
 
-    PRODUCTION = ("planning", "production.json")
+    PRODUCTION = ("planning", "production-plan.json")
     TREND_RESULT = ("planning", "trend-result.json")
     CREATIVE_CONCEPT = ("planning", "concept.json")
     MUSIC_STRATEGY = ("planning", "music-strategy.json")
@@ -60,7 +60,7 @@ class ArtifactKind(str, Enum):
     SHORT_VIDEO = ("render", "short-9x16.mp4")
     METADATA = ("metadata", "metadata.json")
     QC_REPORT = ("qc", "qc-report.json")
-    MANIFEST = ("manifest", "manifest.json")
+    MANIFEST = ("manifest", "production.json")
 
     def __new__(cls, subdir: str, filename: str) -> "ArtifactKind":
         obj = str.__new__(cls, filename)

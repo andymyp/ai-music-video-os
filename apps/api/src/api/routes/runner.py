@@ -49,9 +49,15 @@ class TemporalProductionRunner:
 
     async def _get_client(self):
         from temporalio.client import Client
+        from temporalio.contrib.pydantic import pydantic_data_converter
 
         if self._client is None:
-            self._client = await Client.connect(self._settings.temporal_address)
+            # Pydantic data converter so workflow input/output and activity args
+            # round-trip as models, not plain dicts (TDD-001 §23).
+            self._client = await Client.connect(
+                self._settings.temporal_address,
+                data_converter=pydantic_data_converter,
+            )
         return self._client
 
     async def start(

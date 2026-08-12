@@ -9,7 +9,6 @@ skips when the CLI is absent.
 from __future__ import annotations
 
 import re
-import shutil
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,8 +75,6 @@ from api.workflows.production import (
     ProductionWorkflowOutput,
     next_status_in_flow,
 )
-
-TEMPORAL_CLI_PRESENT = shutil.which("temporal") is not None
 
 SAMPLE_PRODUCTION_ID = new_production_id()
 
@@ -429,29 +426,53 @@ def test_workflow_modules_never_import_side_effect_layers_at_top_level():
     assert offenders == [], "workflows must not import side-effect layers:\n" + "\n".join(offenders)
 
 
-# --- Server-backed end-to-end (skips without a Temporal CLI) ------------------
+# --- Server-backed end-to-end (in-process Temporal test server) --------------
 
-@pytest.mark.skipif(not TEMPORAL_CLI_PRESENT, reason="Temporal CLI not on PATH")
 async def test_production_workflow_end_to_end_with_server(services, session_factory, settings):
-    """Drive ProductionWorkflow to completion against a real Temporal dev server.
+    """Drive ProductionWorkflow to completion through the in-process test server.
 
-    Requires the ``temporal`` CLI so ``WorkflowEnvironment`` can start a dev
-    server. In CI without the CLI this test skips; the offline activity tests
-    above cover the same behaviour via ``ActivityEnvironment``.
+    Registers a real Worker (``ProductionWorkflow`` + ``ALL_ACTIVITIES``) against
+    ``WorkflowEnvironment.start_time_skipping()`` and asserts the run reaches
+    COMPLETED with every §69 Final Output Contract artifact on disk — the Phase 26
+    Final Acceptance proof that the whole pipeline executes through Temporal with
+    the real media engines.
     """
+    from temporalio.contrib.pydantic import pydantic_data_converter
     from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
 
-    from api.workflows.production import ProductionWorkflow
+    from api.activities import resolve_activity_functions
+    from api.workflows.production import ProductionWorkflow, ProductionWorkflowInput
 
     prod = _make_production(session_factory)
-    async with await WorkflowEnvironment.start_time_skipping() as env:
-        handle = await env.client.start_workflow(
-            ProductionWorkflow,
-            arg=ProductionWorkflowInput(
-                production_id=prod.id, mode=prod.mode, genre=prod.genre,
-            ),
-            id=f"wf-{prod.id}",
+    async with await WorkflowEnvironment.start_time_skipping(
+        data_converter=pydantic_data_converter
+    ) as env:
+        async with Worker(
+            env.client,
             task_queue="production",
-        )
-        result = await handle.result()
-        assert result.production_id == prod.id
+            workflows=[ProductionWorkflow],
+            activities=resolve_activity_functions(),
+        ):
+            handle = await env.client.start_workflow(
+                ProductionWorkflow,
+                arg=ProductionWorkflowInput(
+                    production_id=prod.id, mode=prod.mode, genre=prod.genre,
+                ),
+                id=f"wf-{prod.id}",
+                task_queue="production",
+            )
+            result = await handle.result()
+
+    # Final output contract (MASTER §69).
+    assert result.production_id == prod.id
+    assert result.status == ProductionStatus.COMPLETED
+    root = settings.app_data_dir / "productions" / prod.id
+    for rel in (
+        "render/master-16x9.mp4",
+        "render/short-9x16.mp4",
+        "metadata/metadata.json",
+        "manifest/production.json",
+        "qc/qc-report.json",
+    ):
+        assert (root / rel).exists(), f"missing final artifact: {rel}"

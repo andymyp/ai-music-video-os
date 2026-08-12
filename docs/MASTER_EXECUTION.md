@@ -1926,7 +1926,7 @@ Maintain the following table in the project:
 | 23    | Security                | COMPLETED   |
 | 24    | End-to-End Integration  | COMPLETED   |
 | 25    | Performance Validation  | COMPLETED   |
-| 26    | Final Acceptance        | NOT_STARTED |
+| 26    | Final Acceptance        | COMPLETED   |
 
 Allowed statuses:
 
