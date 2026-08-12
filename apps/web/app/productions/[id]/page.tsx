@@ -17,8 +17,12 @@ export default function ProductionPage({
 }) {
   const { id } = use(params);
   return (
-    <main className="min-h-screen bg-zinc-950 text-zinc-100">
-      <div className="mx-auto max-w-5xl px-6 py-10">
+    <main className="relative min-h-screen bg-zinc-950 text-zinc-100">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 top-0 h-64 bg-gradient-to-b from-indigo-500/[0.08] via-violet-500/[0.03] to-transparent"
+      />
+      <div className="relative mx-auto max-w-5xl px-6 py-10">
         <ProductionDetail productionId={id} />
       </div>
     </main>
