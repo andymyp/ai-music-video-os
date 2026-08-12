@@ -5,8 +5,22 @@
   "description": "Local-first AI instrumental music video production OS",
   "packageManager": "pnpm@10.28.0",
   "scripts": {
-    "dev": "pnpm --filter @amv/web dev",
-    "build": "pnpm --filter @amv/web build",
-    "start": "pnpm --filter @amv/web start"
+    "prepare": "node scripts/prepare.mjs",
+    "dev": "concurrently -k -n temporal,api,worker,web -c blue,green,magenta,cyan \"pnpm dev:temporal\" \"pnpm dev:api\" \"pnpm dev:worker\" \"pnpm dev:web\"",
+    "dev:apps": "concurrently -k -n api,worker,web -c green,magenta,cyan \"pnpm dev:api\" \"pnpm dev:worker\" \"pnpm dev:web\"",
+    "dev:temporal": "temporal server start-dev",
+    "dev:api": "uv run amv-api",
+    "dev:worker": "uv run amv-worker",
+    "dev:web": "pnpm --filter @amv/web dev",
+    "build": "pnpm build:web",
+    "build:web": "pnpm --filter @amv/web build",
+    "start": "pnpm --filter @amv/web start",
+    "test": "uv run pytest apps/api/tests tests -q -p no:cacheprovider",
+    "test:fast": "uv run pytest apps/api/tests tests -q -p no:cacheprovider -k \"not end_to_end_with_server\"",
+    "check": "node scripts/check-env.mjs",
+    "smoke": "uv run python -m api.worker.smoke_client"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
   }
 }
