@@ -134,3 +134,30 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.uv/
+
+# Local environment
+.env
+
+# Runtime data (tracked only via .gitkeep placeholders)
+data/database/*
+!data/database/.gitkeep
+data/productions/*
+!data/productions/.gitkeep
+data/assets/*
+!data/assets/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
+data/temp/*
+!data/temp/.gitkeep

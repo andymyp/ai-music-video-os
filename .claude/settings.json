@@ -1,0 +1,12 @@
+{
+  "env": {
+    "ANTHROPIC_API_KEY": "omniroute",
+    "ANTHROPIC_BASE_URL": "http://localhost:20128/v1",
+    "ANTHROPIC_DEFAULT": "auto/best-coding",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "auto/best-coding",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "auto/pro-coding",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "auto/coding",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "180000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}

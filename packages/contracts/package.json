@@ -1,0 +1,9 @@
+{
+  "name": "@amv/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "Shared API/domain contracts between apps (Phase 01+)."
+}
